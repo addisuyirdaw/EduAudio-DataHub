@@ -4,10 +4,10 @@
  * Backend DataHub orchestration for the EduAudio relay.
  *
  * Every metadata lookup and telemetry write-back is attempted through the
- * DataHub MCP Server interface first, then the raw DataHub GraphQL relay,
- * and finally degrades to a local mock catalog. The mobile app therefore
- * never sees a hard failure when external DataHub credentials or the MCP
- * server are unavailable.
+ * DataHub MCP Server interface first, then the real DataHub GMS GraphQL API
+ * (search / dataset), and finally degrades to a local mock catalog. The
+ * mobile app therefore never sees a hard failure when external DataHub
+ * credentials or the MCP server are unavailable.
  *
  * DataHub MCP Server configuration (all optional):
  *   - DATAHUB_MCP_URL        streamable HTTP endpoint of an MCP server
@@ -16,12 +16,16 @@
  *   - DATAHUB_MCP_TOKEN      optional bearer token for the HTTP endpoint
  *   - DATAHUB_GMS_TOKEN      token forwarded to the MCP server process
  *                            (DATAHUB_PAT_TOKEN is used as a fallback)
+ *   - DATAHUB_LESSON_URN     lesson Dataset URN used for `update_description`
+ *                            mutation write-backs
  *
  * GraphQL fallback configuration:
  *   - DATAHUB_GMS_URL        DataHub GMS base origin
  *   - DATAHUB_PAT_TOKEN      Personal Access Token
  *
  * Resolution order per request: MCP Server -> GraphQL -> LOCAL MOCK.
+ * Telemetry is also aggregated in memory and can be flushed back to DataHub
+ * as an insights Document so the next agent inherits aggregated knowledge.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -29,10 +33,18 @@ import { DataHubMcpClient } from './datahubMcpClient';
 
 export type DataHubMode = 'mcp' | 'datahub' | 'mock';
 
+export interface OutlineItem {
+  id: string;
+  title: string;
+  pageNumber: number;
+  level: number;
+  description?: string;
+}
+
 export interface DocumentPayload {
   id: string;
   title: string;
-  outline: Array<{ id: string; title: string; pageNumber: number; level: number }>;
+  outline: OutlineItem[];
   headings: Array<{ level: number; text: string; position: number }>;
   accessibility: {
     hasTranscript: boolean;
@@ -63,7 +75,26 @@ export interface TelemetryResult {
   mcp?: { transport: string; tool: string };
 }
 
+export interface InsightsSnapshot {
+  totalSessions: number;
+  totalDurationMs: number;
+  byIntent: Record<string, number>;
+  byOutcome: Record<string, number>;
+  failedCommands: number;
+  windowStart: string;
+  windowEnd: string;
+}
+
+export interface FlushInsightsResult {
+  written: boolean;
+  source: 'mcp' | 'mock';
+  reason?: string;
+  title?: string;
+  snapshot?: InsightsSnapshot;
+}
+
 const VERSION = '1.0.5';
+const INSIGHT_WINDOW_SESSIONS = 10;
 
 function log(message: string): void {
   console.log(`[DataHubService] ${message}`);
@@ -81,15 +112,15 @@ function resolveMcpConfig() {
   const command = (process.env.DATAHUB_MCP_COMMAND ?? '').trim();
   const argsRaw = (process.env.DATAHUB_MCP_ARGS ?? '').trim();
   const token = (process.env.DATAHUB_MCP_TOKEN ?? '').trim();
-
-  const isConfigured = url.length > 0 || command.length > 0;
+  const lessonUrn = (process.env.DATAHUB_LESSON_URN ?? '').trim();
 
   return {
-    isConfigured,
+    isConfigured: url.length > 0 || command.length > 0,
     url: url || undefined,
     command: command || undefined,
     args: argsRaw ? argsRaw.split(/\s+/).filter(Boolean) : [],
     token: token || undefined,
+    lessonUrn: lessonUrn || undefined,
     serverEnv: {
       // The DataHub MCP server reads its connection settings from these env
       // vars; forward the relay's DataHub settings to the spawned process.
@@ -117,33 +148,44 @@ function buildGraphQlEndpoint(gmsUrl: string): string {
   return `${gmsUrl.replace(/\/+$/, '')}/api/graphql`;
 }
 
-const DOCUMENT_QUERY = `
-  query GetEducationalMetadata($id: String!) {
-    document(id: $id) {
-      id
-      outline {
-        id
-        title
-        pageNumber
-        level
-      }
-      headings {
-        level
-        text
-        position
-      }
-      accessibility {
-        hasTranscript
-        hasAltText
-        isScreenReaderOptimized
+// Real DataHub GMS GraphQL: entity search + dataset detail. Unlike the older
+// custom `document(id)` schema, these queries run against any DataHub GMS.
+const SEARCH_QUERY = `
+  query SearchCourses($input: SearchInput!) {
+    search(input: $input) {
+      total
+      start
+      count
+      searchResults {
+        entity {
+          ... on Dataset {
+            urn
+            name
+            properties { name description }
+            ownership { owners { owner { ... on CorpUser { urn properties { displayName } } } } }
+            domains { domains { ... on Domain { urn properties { name } } } }
+          }
+          ... on Document {
+            urn
+            properties { name }
+          }
+        }
       }
     }
   }
 `;
 
-const TELEMETRY_MUTATION = `
-  mutation RecordTelemetry($payload: String!) {
-    recordTelemetry(input: $payload)
+const DATASET_QUERY = `
+  query GetDatasetDetail($urn: String!) {
+    dataset(urn: $urn) {
+      urn
+      name
+      properties { name description }
+      schemaMetadata { fields { fieldPath nativeDataType description } }
+      glossaryTerms { terms { term { urn } } }
+      ownership { owners { owner { ... on CorpUser { urn properties { displayName } } } } }
+      domains { domains { ... on Domain { urn properties { name } } } }
+    }
   }
 `;
 
@@ -177,10 +219,10 @@ function buildMockDocument(documentId: string): DocumentPayload {
 }
 
 /**
- * Extract a document list from an MCP tool response. The DataHub MCP
- * `search_documents` tool returns a JSON text payload with a `results`
- * array; `get_entities` returns entities keyed by URN. We accept any of
- * those shapes and normalize to `{ id, title }`.
+ * Extract a document/entity list from an MCP tool response. Accepts:
+ *   - { "results": [ { urn, name|displayName|title } ] }   (search_documents)
+ *   - { "entities": [ { urn, name } ] }                    (search)
+ *   - a bare JSON array
  */
 function extractDocuments(text: string): Array<{ id: string; title: string }> {
   if (!text || !text.trim()) return [];
@@ -198,21 +240,22 @@ function extractDocuments(text: string): Array<{ id: string; title: string }> {
     entries.push(...(parsed as Array<Record<string, unknown>>));
   } else if (parsed && typeof parsed === 'object') {
     const obj = parsed as Record<string, unknown>;
-    if (Array.isArray(obj.results)) {
-      entries.push(...(obj.results as Array<Record<string, unknown>>));
-    } else if (Array.isArray(obj.entities)) {
-      entries.push(...(obj.entities as Array<Record<string, unknown>>));
-    } else if (Array.isArray(obj.documents)) {
-      entries.push(...(obj.documents as Array<Record<string, unknown>>));
+    for (const key of ['results', 'entities', 'documents']) {
+      if (Array.isArray(obj[key])) {
+        entries.push(...(obj[key] as Array<Record<string, unknown>>));
+        break;
+      }
     }
   }
 
   const docs: Array<{ id: string; title: string }> = [];
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') continue;
-    const title =
-      String(entry.name ?? entry.displayName ?? entry.title ?? entry.qualifiedName ?? '').trim();
-    const id = String(entry.urn ?? entry.id ?? entry.entityUrn ?? '').trim();
+    const props = (entry.properties ?? {}) as Record<string, unknown>;
+    const title = String(
+      entry.name ?? entry.displayName ?? entry.title ?? props.name ?? props.title ?? ''
+    ).trim();
+    const id = String(entry.urn ?? entry.id ?? entry.entityUrn ?? props.urn ?? '').trim();
     if (title || id) {
       docs.push({ id: id || title, title: title || id });
     }
@@ -221,16 +264,35 @@ function extractDocuments(text: string): Array<{ id: string; title: string }> {
 }
 
 /**
- * Convert a DataHub MCP document list into EduAudio's outline shape.
+ * Extract per-URN descriptions from a `get_entities` response shaped like
+ * `{ entities: { "<urn>": { properties: { name, description } } } }`.
  */
-function docsToOutline(
-  docs: Array<{ id: string; title: string }>
-): DocumentPayload['outline'] {
+function extractEntityDescriptions(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!text || !text.trim()) return out;
+  try {
+    const parsed = JSON.parse(text) as { entities?: Record<string, any> };
+    const entities = parsed.entities;
+    if (!entities || typeof entities !== 'object') return out;
+    for (const [urn, entity] of Object.entries(entities)) {
+      const description = String(
+        entity?.properties?.description ?? entity?.description ?? ''
+      ).trim();
+      if (description) out[urn] = description;
+    }
+  } catch {
+    // ignore unparseable enrichment
+  }
+  return out;
+}
+
+function docsToOutline(docs: Array<{ id: string; title: string }>, descriptions: Record<string, string> = {}): OutlineItem[] {
   return docs.map((doc, index) => ({
     id: doc.id,
     title: doc.title,
     pageNumber: index + 1,
     level: 1,
+    ...(descriptions[doc.id] ? { description: descriptions[doc.id] } : {}),
   }));
 }
 
@@ -261,14 +323,51 @@ function buildTelemetrySummary(payload: Record<string, unknown>): string {
   ].join(' ');
 }
 
+function emptyInsights(): InsightsSnapshot {
+  const now = new Date().toISOString();
+  return {
+    totalSessions: 0,
+    totalDurationMs: 0,
+    byIntent: {},
+    byOutcome: {},
+    failedCommands: 0,
+    windowStart: now,
+    windowEnd: now,
+  };
+}
+
+function markdownInsights(snapshot: InsightsSnapshot): string {
+  const lines = [
+    `# EduAudio Voice Session Insights`,
+    '',
+    `- Window: ${snapshot.windowStart} -> ${snapshot.windowEnd}`,
+    `- Total sessions: ${snapshot.totalSessions}`,
+    `- Total engagement: ${(snapshot.totalDurationMs / 1000).toFixed(1)}s`,
+    `- Failed commands: ${snapshot.failedCommands}`,
+    '',
+    '## Intents',
+  ];
+  for (const [intent, count] of Object.entries(snapshot.byIntent).sort((a, b) => b[1] - a[1])) {
+    lines.push(`- ${intent}: ${count}`);
+  }
+  lines.push('', '## Outcomes');
+  for (const [outcome, count] of Object.entries(snapshot.byOutcome).sort((a, b) => b[1] - a[1])) {
+    lines.push(`- ${outcome}: ${count}`);
+  }
+  return lines.join('\n');
+}
+
 /**
  * Backend DataHub orchestrator: MCP Server -> GraphQL -> local mock.
  */
 class DataHubService {
   private readonly mcp: DataHubMcpClient;
+  private readonly lessonUrn: string | undefined;
+  private insights: InsightsSnapshot = emptyInsights();
 
   constructor() {
     const mcpConfig = resolveMcpConfig();
+    this.lessonUrn = mcpConfig.lessonUrn;
     this.mcp = new DataHubMcpClient({
       url: mcpConfig.url,
       command: mcpConfig.command,
@@ -330,15 +429,23 @@ class DataHubService {
 
   /**
    * Record a voice-session telemetry write-back. Attempts the MCP Server path
-   * (save_document / update_description), then the GraphQL mutation, then a
-   * local acknowledgment. Never throws.
+   * (save_document + optional update_description mutation), then the GraphQL
+   * mutation, then a local acknowledgment. Never throws.
    */
   async recordTelemetry(payload: Record<string, unknown>): Promise<TelemetryResult> {
+    this.aggregate(payload);
+
     const telemetryId = payload.telemetryId as string | undefined;
 
     if (this.mcp.isConfigured) {
       try {
-        return await this.recordViaMcp(payload, telemetryId);
+        const result = await this.recordViaMcp(payload, telemetryId);
+        if (this.insights.totalSessions >= INSIGHT_WINDOW_SESSIONS) {
+          // Auto-flush aggregated insights back to DataHub so the next
+          // person or agent inherits the aggregated knowledge.
+          await this.flushInsights();
+        }
+        return result;
       } catch (error) {
         warn('MCP telemetry write-back failed; falling back.', error);
       }
@@ -371,6 +478,54 @@ class DataHubService {
     };
   }
 
+  /** Current in-memory session insights (aggregated from telemetry). */
+  getInsights(): InsightsSnapshot {
+    return { ...this.insights };
+  }
+
+  /**
+   * Write the aggregated session insights back to DataHub as a knowledge
+   * Document via the MCP `save_document` tool. Resets the window on success.
+   */
+  async flushInsights(): Promise<FlushInsightsResult> {
+    const snapshot = this.getInsights();
+
+    if (snapshot.totalSessions === 0) {
+      return { written: false, source: 'mock', reason: 'no sessions recorded in the current window' };
+    }
+
+    if (!this.mcp.isConfigured) {
+      return {
+        written: false,
+        source: 'mock',
+        reason: 'MCP Server not configured; set DATAHUB_MCP_URL or DATAHUB_MCP_COMMAND',
+      };
+    }
+
+    try {
+      await this.mcp.connect();
+      const title = `EduAudio Voice Session Insights ${new Date().toISOString().slice(0, 10)}`;
+      const content = `${markdownInsights(snapshot)}\n\n\`\`\`json\n${JSON.stringify(
+        snapshot,
+        null,
+        2
+      )}\n\`\`\``;
+
+      log(`Writing aggregated insights document via save_document (${title})`);
+      await this.mcp.callTool('save_document', { title, content });
+
+      this.insights = emptyInsights();
+      return { written: true, source: 'mcp', title, snapshot };
+    } catch (error) {
+      warn('Insights write-back to MCP failed.', error);
+      return {
+        written: false,
+        source: 'mock',
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   // ─── MCP Server path ─────────────────────────────────────────────────────────
 
   private async fetchViaMcp(documentId: string): Promise<QueryEnvelope> {
@@ -381,18 +536,40 @@ class DataHubService {
       // tool listing is diagnostic-only; continue with the call.
     }
 
-    log(`MCP context read for "${documentId}" via search_documents`);
-    const search = await this.mcp.callTool('search_documents', { query: documentId });
+    let docs: Array<{ id: string; title: string }> = [];
+    let toolUsed = 'search_documents';
 
-    const docs = extractDocuments(search.text);
+    log(`MCP context read for "${documentId}" via search_documents`);
+    const searchDocs = await this.mcp.callTool('search_documents', { query: documentId });
+    docs = extractDocuments(searchDocs.text);
+
     if (docs.length === 0) {
-      throw new Error('MCP search_documents returned no usable document results.');
+      // Document knowledge-base may be empty; fall back to dataset search.
+      toolUsed = 'search';
+      log(`search_documents empty; trying dataset "search" tool for "${documentId}"`);
+      const search = await this.mcp.callTool('search', { query: documentId });
+      docs = extractDocuments(search.text);
     }
 
-    const outline = docsToOutline(docs);
+    if (docs.length === 0) {
+      throw new Error(`MCP returned no usable results for "${documentId}" (${toolUsed}).`);
+    }
+
+    // Best-effort enrichment with schema/property metadata.
+    const descriptions: Record<string, string> = {};
+    try {
+      const entities = await this.mcp.callTool('get_entities', {
+        urns: docs.slice(0, 5).map((doc) => doc.id),
+      });
+      Object.assign(descriptions, extractEntityDescriptions(entities.text));
+    } catch {
+      log('get_entities enrichment skipped (tool unavailable or error).');
+    }
+
+    const outline = docsToOutline(docs, descriptions);
     const headings = docsToHeadings(docs);
 
-    log(`MCP returned ${docs.length} document(s) for "${documentId}"; serving as outline.`);
+    log(`MCP returned ${docs.length} result(s) for "${documentId}" via ${toolUsed}; serving as outline.`);
     return {
       data: {
         document: {
@@ -414,7 +591,7 @@ class DataHubService {
         version: VERSION,
         generatedAt: new Date().toISOString(),
         cacheStatus: 'HIT',
-        mcp: { transport: this.mcp.transportLabel, tool: 'search_documents' },
+        mcp: { transport: this.mcp.transportLabel, tool: toolUsed },
       },
     };
   }
@@ -436,6 +613,23 @@ class DataHubService {
     log(`MCP telemetry write-back via save_document (${title})`);
     await this.mcp.callTool('save_document', { title, content: body });
 
+    // Governance contribution: append the session to the lesson Dataset's
+    // description via the MCP mutation tool (TOOLS_IS_MUTATION_ENABLED=true).
+    if (this.lessonUrn) {
+      try {
+        const append = `\n\nLatest engagement (${new Date().toISOString()}): ${buildTelemetrySummary(
+          payload
+        )}`;
+        log(`MCP mutation: update_description on ${this.lessonUrn}`);
+        await this.mcp.callTool('update_description', {
+          urn: this.lessonUrn,
+          description: append,
+        });
+      } catch (error) {
+        warn('MCP update_description mutation skipped (may be disabled).', error);
+      }
+    }
+
     return {
       accepted: true,
       telemetryId: id,
@@ -445,7 +639,7 @@ class DataHubService {
     };
   }
 
-  // ─── GraphQL relay path ──────────────────────────────────────────────────────
+  // ─── GraphQL relay path (real DataHub GMS API) ───────────────────────────────
 
   private async fetchViaGraphQl(
     gmsUrl: string,
@@ -455,33 +649,90 @@ class DataHubService {
     const endpoint = buildGraphQlEndpoint(gmsUrl);
     log(`GraphQL context read for "${documentId}" via ${endpoint}`);
 
-    const response = await fetch(endpoint, {
+    const searchResponse = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': `Bearer ${patToken}`,
-      },
+      headers: this.graphQlHeaders(patToken),
       body: JSON.stringify({
-        query: DOCUMENT_QUERY,
-        variables: { id: documentId },
+        query: SEARCH_QUERY,
+        variables: {
+          input: { type: 'DATASET', query: documentId, start: 0, count: 20 },
+        },
       }),
     });
 
-    const result = (await response.json()) as {
+    const searchResult = (await searchResponse.json()) as {
       errors?: unknown;
-      data?: { document?: DocumentPayload };
+      data?: {
+        search?: {
+          searchResults?: Array<{ entity?: Record<string, any> }>;
+        };
+      };
     };
 
-    if (!response.ok || result.errors || !result.data?.document) {
+    if (!searchResponse.ok || searchResult.errors) {
       throw new Error(
-        `GraphQL degraded (${response.status}): ${JSON.stringify(result.errors ?? 'no document')}`
+        `GraphQL search degraded (${searchResponse.status}): ${JSON.stringify(
+          searchResult.errors ?? 'no data'
+        )}`
       );
     }
 
-    log(`GraphQL returned document "${result.data.document.id}"`);
+    const results = searchResult.data?.search?.searchResults ?? [];
+    const docs = results
+      .map(({ entity }) => entity)
+      .filter((entity): entity is Record<string, any> => Boolean(entity))
+      .map((entity) => ({
+        id: String(entity.urn ?? ''),
+        title: String(
+          entity.name ?? entity.properties?.name ?? entity.properties?.title ?? entity.urn ?? ''
+        ),
+      }))
+      .filter((doc) => doc.id);
+
+    if (docs.length === 0) {
+      throw new Error(`GraphQL search returned no dataset results for "${documentId}".`);
+    }
+
+    // Enrichment: dataset detail (schema, ownership, domains).
+    const descriptions: Record<string, string> = {};
+    try {
+      const detailResponse = await fetch(endpoint, {
+        method: 'POST',
+        headers: this.graphQlHeaders(patToken),
+        body: JSON.stringify({
+          query: DATASET_QUERY,
+          variables: { urn: docs[0].id },
+        }),
+      });
+      const detail = (await detailResponse.json()) as { data?: { dataset?: any } };
+      const dataset = detail.data?.dataset;
+      if (dataset?.properties?.description) {
+        descriptions[dataset.urn] = String(dataset.properties.description);
+      }
+    } catch (error) {
+      warn('GraphQL dataset detail enrichment skipped.', error);
+    }
+
+    const outline = docsToOutline(docs, descriptions);
+    const headings = docsToHeadings(docs);
+
+    log(`GraphQL returned ${docs.length} dataset result(s); serving as outline.`);
     return {
-      data: { document: result.data.document },
+      data: {
+        document: {
+          id: docs[0].id,
+          title: docs[0].title,
+          outline,
+          headings,
+          accessibility: {
+            hasTranscript: true,
+            hasAltText: false,
+            isScreenReaderOptimized: true,
+            isTalkBackOptimized: true,
+            isVoiceOverOptimized: true,
+          },
+        },
+      },
       metadata: {
         source: 'datahub',
         version: VERSION,
@@ -497,23 +748,38 @@ class DataHubService {
     payload: Record<string, unknown>
   ): Promise<boolean> {
     const endpoint = buildGraphQlEndpoint(gmsUrl);
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': `Bearer ${patToken}`,
-      },
-      body: JSON.stringify({
-        query: TELEMETRY_MUTATION,
-        variables: { payload: JSON.stringify(payload) },
-      }),
-    });
 
-    const result = (await response.json()) as { errors?: unknown };
-    const accepted = response.ok && !result.errors;
-    log(`GraphQL telemetry write-back ${accepted ? 'accepted' : 'rejected'}.`);
-    return accepted;
+    // Real DataHub write-back: attach an ownership/structure-free aspect via
+    // the REST ingest endpoint is out of scope here; report the attempt so
+    // telemetry routing still resolves. Prefer MCP mutation tools instead.
+    log('GraphQL telemetry mutation not supported by real DataHub GMS; marking as unacknowledged.');
+    void endpoint;
+    void payload;
+    void patToken;
+    return false;
+  }
+
+  private graphQlHeaders(patToken: string): Record<string, string> {
+    return {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${patToken}`,
+    };
+  }
+
+  // ─── Insight aggregation ─────────────────────────────────────────────────────
+
+  private aggregate(payload: Record<string, unknown>): void {
+    const intent = String(payload.intent ?? payload.command ?? 'voice_session');
+    const outcome = String(payload.outcome ?? 'success');
+    const duration = typeof payload.durationMs === 'number' ? payload.durationMs : 0;
+
+    this.insights.totalSessions += 1;
+    this.insights.totalDurationMs += duration;
+    this.insights.byIntent[intent] = (this.insights.byIntent[intent] ?? 0) + 1;
+    this.insights.byOutcome[outcome] = (this.insights.byOutcome[outcome] ?? 0) + 1;
+    if (outcome !== 'success') this.insights.failedCommands += 1;
+    this.insights.windowEnd = new Date().toISOString();
   }
 }
 

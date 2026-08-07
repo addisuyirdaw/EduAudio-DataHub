@@ -81,6 +81,25 @@ app.post('/api/datahub/query', async (req, res) => {
   }
 });
 
+// ─── Insights ─────────────────────────────────────────────────────────────────
+
+app.get('/api/datahub/insights', (_req, res) => {
+  res.json(dataHubService.getInsights());
+});
+
+app.post('/api/datahub/insights/flush', async (_req, res) => {
+  try {
+    const result = await dataHubService.flushInsights();
+    console.log(
+      `[relay] Insights flush ${result.written ? 'written' : 'skipped'} (${result.reason ?? result.title ?? 'n/a'})`
+    );
+    res.status(result.written ? 200 : 200).json(result);
+  } catch (error) {
+    console.error('[relay] Insights flush error:', error);
+    res.status(500).json({ written: false, errors: [error instanceof Error ? error.message : String(error)] });
+  }
+});
+
 // ─── Telemetry write-back ─────────────────────────────────────────────────────
 
 app.post('/api/datahub/telemetry', async (req, res) => {
