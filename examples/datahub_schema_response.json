@@ -1,0 +1,210 @@
+{
+  "data": {
+    "entity": {
+      "urn": "urn:li:dataset:(urn:li:dataPlatform:eduCourse,QuantumMechanics101_lesson4,PROD)",
+      "type": "DATASET",
+      "name": "QuantumMechanics101_lesson4",
+      "platform": {
+        "urn": "urn:li:dataPlatform:eduCourse",
+        "name": "eduCourse"
+      },
+      "browsePath": [
+        {
+          "name": "EduAudio Catalog",
+          "entities": []
+        },
+        {
+          "name": "Quantum Mechanics 101",
+          "entities": []
+        },
+        {
+          "name": "Lesson 4 - Wave-Particle Duality",
+          "entities": []
+        }
+      ],
+      "description": "Accessible voice-interactive audio lesson covering wave-particle duality, the double-slit experiment, and the De Broglie hypothesis.",
+      "structuredProperties": {
+        "properties": [
+          {
+            "key": "eduAudio:courseCode",
+            "value": "PHYS101"
+          },
+          {
+            "key": "eduAudio:lessonNumber",
+            "value": "4"
+          },
+          {
+            "key": "eduAudio:contentLanguage",
+            "value": "en-US"
+          },
+          {
+            "key": "eduAudio:readingLevel",
+            "value": "Undergraduate"
+          },
+          {
+            "key": "eduAudio:estimatedMinutes",
+            "value": "45"
+          },
+          {
+            "key": "eduAudio:voiceInteractive",
+            "value": "true"
+          }
+        ]
+      },
+      "schemaMetadata": {
+        "schemaName": "edu_course_lesson",
+        "platformSchema": {
+          "fields": [
+            {
+              "fieldPath": "lesson_id",
+              "type": "STRING",
+              "nativeDataType": "varchar(64)",
+              "description": "Stable identifier used to reconcile EduAudio metadata and telemetry.",
+              "nullable": false,
+              "isPartOfKey": true
+            },
+            {
+              "fieldPath": "title",
+              "type": "STRING",
+              "nativeDataType": "varchar(255)",
+              "description": "Human-readable lesson title.",
+              "nullable": false
+            },
+            {
+              "fieldPath": "audio_uri",
+              "type": "STRING",
+              "nativeDataType": "varchar(512)",
+              "description": "Signed URI of the narrated audio asset.",
+              "nullable": false
+            },
+            {
+              "fieldPath": "transcript_uri",
+              "type": "STRING",
+              "nativeDataType": "varchar(512)",
+              "description": "Verbatim transcript asset used by the structural verifier.",
+              "nullable": false
+            },
+            {
+              "fieldPath": "alt_text",
+              "type": "STRING",
+              "nativeDataType": "varchar(1024)",
+              "description": "WCAG 2.2 AAA compliant alt text for embedded figures.",
+              "nullable": true
+            },
+            {
+              "fieldPath": "toc_outline",
+              "type": "STRUCT",
+              "nativeDataType": "array<struct>",
+              "description": "Nested table of contents consumed by DataHubService.verifyStructuralContext.",
+              "nullable": true,
+              "children": [
+                {
+                  "fieldPath": "toc_outline[].id",
+                  "type": "STRING",
+                  "nativeDataType": "varchar(64)",
+                  "description": "Outline node id (e.g. toc-3)."
+                },
+                {
+                  "fieldPath": "toc_outline[].title",
+                  "type": "STRING",
+                  "nativeDataType": "varchar(255)",
+                  "description": "Heading text."
+                },
+                {
+                  "fieldPath": "toc_outline[].pageNumber",
+                  "type": "NUMBER",
+                  "nativeDataType": "int",
+                  "description": "Page offset in the source document."
+                },
+                {
+                  "fieldPath": "toc_outline[].level",
+                  "type": "NUMBER",
+                  "nativeDataType": "int",
+                  "description": "Heading level (1 = chapter, 2 = section)."
+                }
+              ]
+            },
+            {
+              "fieldPath": "accessibility",
+              "type": "STRUCT",
+              "nativeDataType": "struct",
+              "description": "Accessibility flags surfaced to the voice-first player.",
+              "nullable": false,
+              "children": [
+                {
+                  "fieldPath": "accessibility.hasTranscript",
+                  "type": "BOOLEAN",
+                  "nativeDataType": "boolean"
+                },
+                {
+                  "fieldPath": "accessibility.hasAltText",
+                  "type": "BOOLEAN",
+                  "nativeDataType": "boolean"
+                },
+                {
+                  "fieldPath": "accessibility.isScreenReaderOptimized",
+                  "type": "BOOLEAN",
+                  "nativeDataType": "boolean"
+                },
+                {
+                  "fieldPath": "accessibility.isTalkBackOptimized",
+                  "type": "BOOLEAN",
+                  "nativeDataType": "boolean"
+                },
+                {
+                  "fieldPath": "accessibility.isVoiceOverOptimized",
+                  "type": "BOOLEAN",
+                  "nativeDataType": "boolean"
+                }
+              ]
+            }
+          ],
+          "primaryKeys": ["lesson_id"]
+        }
+      },
+      "ownership": {
+        "owners": [
+          {
+            "owner": {
+              "urn": "urn:li:corpuser:eduaudio",
+              "type": "CORP_USER"
+            },
+            "type": "TECHNICAL_OWNER"
+          }
+        ]
+      },
+      "tags": [
+        {
+          "tag": {
+            "urn": "urn:li:tag:accessible",
+            "name": "accessible"
+          }
+        },
+        {
+          "tag": {
+            "urn": "urn:li:tag:voice-interactive",
+            "name": "voice-interactive"
+          }
+        },
+        {
+          "tag": {
+            "urn": "urn:li:tag:wcag-2-2-aaa",
+            "name": "wcag-2-2-aaa"
+          }
+        }
+      ],
+      "deprecation": {
+        "deprecated": false
+      },
+      "status": {
+        "removed": false
+      }
+    }
+  },
+  "metadata": {
+    "source": "Local DataHub Instance",
+    "version": "1.0.4",
+    "generatedAt": "2026-07-25T10:15:00Z",
+    "cacheStatus": "MISS"
+  }
+}

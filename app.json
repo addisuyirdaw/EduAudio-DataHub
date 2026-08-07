@@ -1,0 +1,64 @@
+{
+  "expo": {
+    "name": "EduAudio Player",
+    "slug": "eduaudio-jbmpdy",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0D0D1A",
+    "plugins": [
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Allow EduAudio to access your microphone for AI voice commands."
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0D0D1A",
+          "resizeMode": "contain"
+        }
+      ],
+      "expo-status-bar",
+      "@config-plugins/react-native-blob-util",
+      "@config-plugins/react-native-pdf",
+      [
+        "@react-native-voice/voice",
+        {
+          "microphonePermission": "Allow EduAudio to access your microphone for AI voice commands.",
+          "speechRecognitionPermission": "Allow EduAudio to securely recognize user speech for commands."
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0D0D1A",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ],
+      "package": "com.anonymous.audioplayer"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "df21c6f3-480f-4ca9-823c-480f614012c4"
+      }
+    },
+    "owner": "adihs-team"
+  }
+}

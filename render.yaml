@@ -1,0 +1,40 @@
+# Render.com blueprint for EduAudio.
+#
+# One-click deploy:
+#   1. Push this repository to GitHub.
+#   2. In Render Dashboard -> New -> Blueprint, select the repo.
+#   3. Render creates the two services below using this render.yaml.
+#
+# 1. Backend Express API relay — serves /api/datahub/query and
+#    /api/datahub/telemetry and degrades to local mock data when DataHub
+#    is not configured (see server/index.ts).
+# 2. Frontend Expo web static site — SPA export (see package.json
+#    "build:web") with EXPO_PUBLIC_API_URL inlined at build time.
+
+services:
+  # 1. Backend Express API Relay
+  - type: web
+    name: eduaudio-backend
+    env: node
+    plan: free
+    buildCommand: npm install --legacy-peer-deps
+    startCommand: npx tsx server/index.ts
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATAHUB_GMS_URL
+        value: http://localhost:8080
+      - key: NODE_VERSION
+        value: 20
+
+  # 2. Frontend Expo Web Static Site
+  - type: static
+    name: eduaudio-frontend
+    buildCommand: npm run build:web
+    staticPublishPath: ./dist
+    envVars:
+      - key: EXPO_PUBLIC_API_URL
+        value: https://eduaudio-backend.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

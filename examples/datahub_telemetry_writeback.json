@@ -1,0 +1,88 @@
+{
+  "eventType": "EDUAUDIO_VOICE_SESSION_TELEMETRY",
+  "eventVersion": "1.0",
+  "datasetUrn": "urn:li:dataset:(urn:li:dataPlatform:eduCourse,QuantumMechanics101_lesson4,PROD)",
+  "session": {
+    "sessionId": "sess_0f9a41c8-2b3d-4e6a-9f01-eduaudio-7f2e",
+    "studentIdHash": "sha256:3b9c1d4a9f3e4b7c2d1f0a8e6c5b4a3d",
+    "device": {
+      "platform": "Android",
+      "osVersion": "14",
+      "appVersion": "1.0.0",
+      "screenReader": "TalkBack"
+    },
+    "startedAt": "2026-07-25T14:03:12Z",
+    "endedAt": "2026-07-25T14:11:14Z",
+    "durationSeconds": 482
+  },
+  "contentContext": {
+    "currentPage": 12,
+    "totalPages": 22,
+    "currentSection": "1.1 Observed Phenomena",
+    "structuralVerified": true,
+    "outlineMatch": {
+      "matchedHeading": "1.1 Observed Phenomena",
+      "verificationSource": "DataHubOutline",
+      "confidence": 0.98
+    }
+  },
+  "voiceInteractions": [
+    {
+      "sequence": 1,
+      "type": "push_to_talk",
+      "recognizedCommand": "go to page twelve",
+      "parsedAction": {
+        "type": "NAVIGATE",
+        "targetPage": 12
+      },
+      "utteranceMs": 1840,
+      "recognitionConfidence": 0.93,
+      "outcome": "success"
+    },
+    {
+      "sequence": 2,
+      "type": "ai_query",
+      "recognizedCommand": "what is wave particle duality",
+      "parsedAction": {
+        "type": "AI_QUERY"
+      },
+      "utteranceMs": 2210,
+      "recognitionConfidence": 0.96,
+      "outcome": "success",
+      "ai": {
+        "model": "gemini-1.5-pro",
+        "latencyMs": 1487,
+        "fallbackUsed": false
+      }
+    },
+    {
+      "sequence": 3,
+      "type": "push_to_talk",
+      "recognizedCommand": "pause reading",
+      "parsedAction": {
+        "type": "PAUSE"
+      },
+      "utteranceMs": 990,
+      "recognitionConfidence": 0.88,
+      "outcome": "success"
+    }
+  ],
+  "audioMutex": {
+    "ttsLockContentionCount": 2,
+    "recordingLockContentionCount": 0,
+    "forceStopsTriggered": 0
+  },
+  "accessibilityEvents": {
+    "screenReaderCoordinationEnabled": true,
+    "liveRegionAnnouncements": 14,
+    "hapticFeedbackEvents": 9,
+    "ttsInterruptionsByScreenReader": 1
+  },
+  "metadataMode": "datahub_configured",
+  "errorsEncountered": [],
+  "metadata": {
+    "source": "EduAudio Client",
+    "telemetrySchemaVersion": "1.0",
+    "generatedAt": "2026-07-25T14:11:16Z"
+  }
+}

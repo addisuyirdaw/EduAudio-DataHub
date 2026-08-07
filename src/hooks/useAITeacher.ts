@@ -1,0 +1,151 @@
+/**
+ * useAITeacher.ts
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Core hook for AI Interactive Teacher Mode
+ *
+ * Provides a clean interface for UI components to interact with the FSM,
+ * voice flow, and accessibility features.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTeacherContext } from '../context/TeacherContext';
+import { useVoiceRecognition } from './useVoiceRecognition';
+import { useTextToSpeech } from './useTextToSpeech';
+import { dataHubService } from '../services/DataHubService';
+import type { PageRange, TeacherState } from '../types/teacher.types';
+
+export interface UseAITeacherReturn {
+  // State
+  state: TeacherState;
+  isReady: boolean;
+  isLoading: boolean;
+  isListening: boolean;
+  isSpeaking: boolean;
+  currentDocument: any;
+  metadata: any;
+  currentPage: number;
+  statusMessage: string;
+  recognizedText: string;
+  onboardingStep: number;
+
+  // Actions
+  loadDocument: (uri: string) => Promise<void>;
+  startReading: (range: PageRange) => Promise<void>;
+  pauseReading: () => Promise<void>;
+  resumeReading: () => Promise<void>;
+  activateListening: () => Promise<void>;
+  askQuestion: (question: string) => Promise<void>;
+  cancelListening: () => Promise<void>;
+  handleTouchDown: () => Promise<void>;
+  handleTouchUp: () => Promise<void>;
+  startOnboarding: () => Promise<void>;
+
+  // Utilities
+  parseVoiceCommand: (command: string) => PageRange | null;
+  verifyContent: (text: string) => boolean;
+  getAccessibilityLabel: () => string;
+}
+
+/**
+ * Main hook for AI Teacher Mode functionality
+ */
+export function useAITeacher(): UseAITeacherReturn {
+  const context = useTeacherContext();
+  const voiceRecognition = useVoiceRecognition();
+  const textToSpeech = useTextToSpeech();
+  
+  const [statusMessage, setStatusMessage] = useState('Ready to study');
+
+  // Sync status messages with FSM state
+  useEffect(() => {
+    switch (context.state) {
+      case 'IDLE':
+        setStatusMessage('Tap anywhere to begin your lesson');
+        break;
+      case 'ONBOARDING':
+        setStatusMessage(`Onboarding Step ${context.onboardingStep}`);
+        break;
+      case 'AI_SPEAKING':
+        setStatusMessage(`Reading page ${context.currentPage}`);
+        break;
+      case 'LISTENING':
+        setStatusMessage('Listening...');
+        break;
+      case 'THINKING':
+        setStatusMessage('Processing...');
+        break;
+      case 'PAUSED':
+        setStatusMessage('Paused. Tap to continue');
+        break;
+      case 'ERROR':
+        setStatusMessage('An error occurred');
+        break;
+    }
+  }, [context.state, context.onboardingStep, context.currentPage]);
+
+  /**
+   * Handle touch down - activate voice recognition or start onboarding
+   */
+  const handleTouchDown = useCallback(async () => {
+    try {
+      await context.handleTouchDown();
+      // Only start recognition if we are not in a speaking-only transition
+      if (context.state !== 'THINKING' && context.state !== 'PARSING_DOC') {
+        await voiceRecognition.startListening();
+      }
+    } catch (error) {
+      console.error('[useAITeacher] Touch down error:', error);
+    }
+  }, [context, voiceRecognition]);
+
+  /**
+   * Handle touch up - process recognized speech
+   */
+  const handleTouchUp = useCallback(async () => {
+    try {
+      await voiceRecognition.stopListening();
+      const text = voiceRecognition.recognizedText;
+      
+      // Pass the text to context for FSM processing (onboarding or commands)
+      await context.handleTouchUp(text || '');
+    } catch (error) {
+      console.error('[useAITeacher] Touch up error:', error);
+    }
+  }, [context, voiceRecognition]);
+
+  return {
+    state: context.state,
+    isReady: context.state === 'IDLE' || context.state === 'PAUSED',
+    isLoading: context.state === 'THINKING' || context.state === 'PARSING_DOC',
+    isListening: context.state === 'LISTENING',
+    isSpeaking: textToSpeech.isSpeaking,
+    currentDocument: context.document,
+    metadata: context.metadata,
+    currentPage: context.currentPage,
+    onboardingStep: context.onboardingStep,
+    statusMessage,
+    recognizedText: voiceRecognition.recognizedText,
+    
+    loadDocument: context.loadDocument,
+    startReading: context.startReading,
+    pauseReading: context.pauseReading,
+    resumeReading: context.resumeReading,
+    activateListening: context.activateListening,
+    askQuestion: context.askQuestion,
+    cancelListening: context.cancelListening,
+    handleTouchDown,
+    handleTouchUp,
+    startOnboarding: context.startOnboarding,
+
+    parseVoiceCommand: (command: string) => null, // Simplified for now
+    verifyContent: (text: string) => {
+      if (!context.metadata || !context.currentPage) return false;
+      return dataHubService.verifyStructuralContext(context.metadata, context.currentPage, text);
+    },
+    getAccessibilityLabel: () => {
+      if (context.state === 'ONBOARDING') return `Step ${context.onboardingStep} of setup. Speak clearly after tapping.`;
+      return statusMessage;
+    },
+  };
+}
