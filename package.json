@@ -47,6 +47,7 @@
     "web": "expo start --web",
     "build:web": "expo export -p web",
     "server": "tsx server/index.ts",
+    "seed:datahub": "tsx server/scripts/seedDatahub.ts",
     "typecheck": "node --stack-size=8192 node_modules/typescript/bin/tsc --noEmit"
   },
   "private": true,

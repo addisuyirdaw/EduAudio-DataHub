@@ -29,6 +29,23 @@
     {
       "step": 2,
       "direction": "READ",
+      "tool": "search",
+      "arguments": {
+        "query": "intro-cognitive-psychology"
+      },
+      "purpose": "Fallback when search_documents returns no documents: dataset search against the DataHub knowledge catalog",
+      "response": {
+        "results": [
+          {
+            "urn": "urn:li:dataset:(urn:li:dataPlatform:custom,edu_intro_cognitive_psychology,PROD)",
+            "name": "Introduction to Cognitive Psychology"
+          }
+        ]
+      }
+    },
+    {
+      "step": 3,
+      "direction": "READ",
       "tool": "get_entities",
       "arguments": {
         "urns": [
@@ -50,7 +67,7 @@
       }
     },
     {
-      "step": 3,
+      "step": 4,
       "direction": "WRITE",
       "tool": "save_document",
       "arguments": {
@@ -62,17 +79,42 @@
         "saved": true,
         "parentTitle": "Shared"
       }
+    },
+    {
+      "step": 5,
+      "direction": "WRITE",
+      "tool": "update_description",
+      "arguments": {
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:custom,lessons,PROD)",
+        "description": "\n\nLatest engagement (2026-08-07T02:25:49.497Z): EduAudio voice session sess_0f9a41c8. Intent: go to page twelve. Duration: 482.0s. Document: urn:li:dataset:(urn:li:dataPlatform:eduCourse,QuantumMechanics101_lesson4,PROD)."
+      },
+      "purpose": "Governance contribution: append the latest engagement to the lesson Dataset description via the MCP mutation tool (TOOLS_IS_MUTATION_ENABLED=true). Requires DATAHUB_LESSON_URN; skipped gracefully if the tool is disabled.",
+      "response": {
+        "updated": true
+      }
+    },
+    {
+      "step": 6,
+      "direction": "WRITE",
+      "tool": "save_document",
+      "arguments": {
+        "title": "EduAudio Voice Session Insights 2026-08-07",
+        "content": "# EduAudio Voice Session Insights\n\n- Window: 2026-08-07T02:23:22.390Z -> 2026-08-07T02:25:49.541Z\n- Total sessions: 10\n- Total engagement: 15.4s\n- Failed commands: 0\n\n## Intents\n- navigate: 10\n\n## Outcomes\n- success: 10"
+      },
+      "purpose": "Aggregated insight write-back: the relay accumulates session insights in memory and auto-flushes a knowledge Document every 10 sessions (or on-demand via POST /api/datahub/insights/flush) so the next agent inherits aggregated knowledge"
     }
   ],
   "fallbackChain": [
-    "1. MCP Server (search_documents / get_entities / save_document)",
-    "2. DataHub GraphQL relay (server/services/DataHubService.ts fetchViaGraphQl)",
+    "1. MCP Server (search_documents -> search -> get_entities / save_document / update_description)",
+    "2. DataHub GraphQL relay (server/services/DataHubService.ts fetchViaGraphQl, real GMS search + dataset)",
     "3. LOCAL MOCK catalog (server/services/DataHubService.ts buildMockDocument)"
   ],
   "diagnostics": [
     "[DataHubMcp] MCP Server path ACTIVE (stdio (uvx mcp-server-datahub@latest))",
     "[DataHubMcp] MCP server advertises 9 tools: search_documents, grep_documents, get_entities, list_schema_fields, get_lineage, get_dataset_queries, get_me, save_document, update_description",
     "[DataHubMcp] Calling DataHub MCP tool \"search_documents\" args={\"query\":\"intro-cognitive-psychology\"}",
-    "[DataHubService] MCP returned 2 document(s) for \"intro-cognitive-psychology\"; serving as outline."
+    "[DataHubService] MCP returned 2 document(s) for \"intro-cognitive-psychology\"; serving as outline.",
+    "[DataHubService] MCP mutation: update_description on urn:li:dataset:(urn:li:dataPlatform:custom,lessons,PROD)",
+    "[DataHubService] Writing aggregated insights document via save_document (EduAudio Voice Session Insights 2026-08-07)"
   ]
 }

@@ -53,6 +53,7 @@ export interface OutlineItem {
   title: string;
   pageNumber: number;
   level: number;
+  description?: string;
 }
 
 /**
@@ -114,6 +115,37 @@ function resolveDataHubConfig(): DataHubConfig {
 function buildGraphQLEndpoint(gmsUrl: string): string {
   return `${gmsUrl.replace(/\/+$/, '')}/api/graphql`;
 }
+
+// Real DataHub GMS GraphQL: entity search + dataset detail. These queries run
+// against any DataHub GMS (the relay server/index.ts uses the same shape).
+const SEARCH_QUERY = `
+  query SearchCourses($input: SearchInput!) {
+    search(input: $input) {
+      total
+      start
+      count
+      searchResults {
+        entity {
+          ... on Dataset {
+            urn
+            name
+            properties { name description }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const DATASET_QUERY = `
+  query GetDatasetDetail($urn: String!) {
+    dataset(urn: $urn) {
+      urn
+      name
+      properties { name description }
+    }
+  }
+`;
 
 /**
  * DataHubService manages document metadata and structural verification
@@ -206,63 +238,61 @@ class DataHubService {
     try {
       const endpoint = buildGraphQLEndpoint(config.gmsUrl);
 
-      // GraphQL query to fetch document structure and accessibility info
-      const graphqlQuery = {
-        query: `
-          query GetEducationalMetadata($id: String!) {
-            document(id: $id) {
-              id
-              outline {
-                id
-                title
-                pageNumber
-                level
-              }
-              headings {
-                level
-                text
-                position
-              }
-              accessibility {
-                hasTranscript
-                hasAltText
-                isScreenReaderOptimized
-              }
-            }
-          }
-        `,
-        variables: { id: documentId },
+      const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${config.patToken}`,
       };
 
-      // Attempt to fetch from local DataHub instance
-      const response = await fetch(endpoint, {
+      // Real DataHub GMS read: dataset search, then dataset detail enrichment.
+      const searchResponse = await fetch(endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': `Bearer ${config.patToken}`,
-        },
-        body: JSON.stringify(graphqlQuery),
+        headers,
+        body: JSON.stringify({
+          query: SEARCH_QUERY,
+          variables: {
+            input: { type: 'DATASET', query: documentId, start: 0, count: 20 },
+          },
+        }),
       });
 
-      if (!response.ok) {
-        throw new Error(`DataHub responded with status: ${response.status}`);
+      if (!searchResponse.ok) {
+        throw new Error(`DataHub responded with status: ${searchResponse.status}`);
       }
 
-      const result = await response.json();
+      const searchResult = await searchResponse.json();
 
-      if (result.errors) {
-        console.error('[DataHubService] GraphQL Errors:', result.errors);
+      if (searchResult.errors) {
+        console.error('[DataHubService] GraphQL Errors:', searchResult.errors);
         throw new Error('GraphQL query returned errors');
       }
 
-      const doc = result.data?.document;
-      if (!doc) {
-        throw new Error('DataHub returned an empty document payload');
+      const results = searchResult.data?.search?.searchResults ?? [];
+      const entities = results.map((result: any) => result?.entity).filter(Boolean);
+
+      if (entities.length === 0) {
+        throw new Error('DataHub returned no dataset results');
+      }
+
+      // Best-effort enrichment with the primary dataset description.
+      let description = '';
+      try {
+        const detailResponse = await fetch(endpoint, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            query: DATASET_QUERY,
+            variables: { urn: entities[0].urn },
+          }),
+        });
+        const detail = await detailResponse.json();
+        description = detail?.data?.dataset?.properties?.description ?? '';
+      } catch (error) {
+        console.warn('[DataHubService] Dataset detail enrichment skipped.', error);
       }
 
       console.log('[DataHubService] Successfully retrieved metadata from DataHub');
-      return this.normalizeDocument(doc, documentId);
+      return this.buildMetadataFromEntities(entities, description, documentId);
     } catch (error) {
       console.warn(
         `[DataHubService] DataHub connection failed. Falling back to local catalog.`,
@@ -327,6 +357,47 @@ class DataHubService {
   }
 
   /**
+   * Build EducationalMetadata from real DataHub dataset search results.
+   * Matches the relay backend's outline/headings mapping in
+   * server/services/DataHubService.ts.
+   */
+  private buildMetadataFromEntities(
+    entities: any[],
+    description: string,
+    documentId: string
+  ): EducationalMetadata {
+    const docs = entities
+      .map((entity) => ({
+        id: String(entity?.urn ?? ''),
+        title: String(entity?.name ?? entity?.properties?.name ?? entity?.urn ?? ''),
+      }))
+      .filter((doc) => doc.id || doc.title);
+
+    return {
+      documentId: docs[0]?.id ?? documentId,
+      outline: docs.map((doc, index) => ({
+        id: doc.id,
+        title: doc.title,
+        pageNumber: index + 1,
+        level: 1,
+        ...(description && index === 0 ? { description } : {}),
+      })),
+      headings: docs.map((doc, index) => ({
+        level: 1,
+        text: doc.title,
+        position: index * 1000,
+      })),
+      accessibility: {
+        hasTranscript: true,
+        hasAltText: false,
+        isScreenReaderOptimized: true,
+        isTalkBackOptimized: true,
+        isVoiceOverOptimized: true,
+      },
+    };
+  }
+
+  /**
    * Logs a voice session telemetry write-back to the DataHub context graph.
    * Telemetry payloads are modeled by examples/datahub_telemetry_writeback.json.
    *
@@ -374,29 +445,13 @@ class DataHubService {
       return false;
     }
 
-    try {
-      const endpoint = buildGraphQLEndpoint(config.gmsUrl);
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': `Bearer ${config.patToken}`,
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        console.warn(`[DataHubService] Telemetry write-back rejected: ${response.status}`);
-        return false;
-      }
-
-      console.log('[DataHubService] Telemetry write-back recorded.');
-      return true;
-    } catch (error) {
-      console.warn('[DataHubService] Telemetry write-back failed:', error);
-      return false;
-    }
+    // Real DataHub GMS exposes no custom telemetry mutation; write-backs must
+    // go through the relay backend (which uses the DataHub MCP Server tools).
+    console.warn(
+      '[DataHubService] Direct DataHub GMS has no custom telemetry mutation; ' +
+        'configure EXPO_PUBLIC_API_URL to write back via the relay backend.'
+    );
+    return false;
   }
 
   /**

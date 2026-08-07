@@ -26,7 +26,7 @@
 *   **Framework**: React Native / Expo (TypeScript)
 *   **State Management**: Finite State Machine (FSM) via React Context
 *   **AI/Voice**: OpenAI API, `expo-speech` (TTS), `@react-native-voice/voice` (STT)
-*   **Metadata Graph**: DataHub (GraphQL API)
+*   **Metadata Graph**: DataHub (DataHub MCP Server + GMS GraphQL API)
 *   **Accessibility**: WCAG 2.2 AAA Compliance, `expo-haptics`
 
 ---
@@ -76,18 +76,43 @@ EduAudio uses a three-tier metadata pipeline:
    `EXPO_PUBLIC_DATAHUB_PAT_TOKEN`) → **local mock mode**.
 2. **Relay Backend** — `server/index.ts` owns the DataHub credentials so the client
    bundle never ships secrets. It exposes:
-   - `POST /api/datahub/query` — reads dataset/course context from DataHub GraphQL and
-     returns `{ data: { document: {...} }, metadata: {...} }`. Falls back to a mock
-     catalog when DataHub is unreachable or unconfigured.
+   - `POST /api/datahub/query` — reads dataset/course context and returns
+     `{ data: { document: {...} }, metadata: {...} }` (metadata carries `source`,
+     `version`, and the MCP tool used).
    - `POST /api/datahub/telemetry` — accepts voice-session telemetry write-backs and
-     returns `{ accepted, telemetryId, source }`.
+     returns `{ accepted, telemetryId, source, datahubWriteBack }`.
+   - `GET /api/datahub/insights` — the aggregated in-memory session insights window.
+   - `POST /api/datahub/insights/flush` — flush the aggregated insights back to DataHub
+     as a knowledge Document (also auto-flushed every 10 sessions).
    - `GET /api/health` — liveness probe plus the active `datahubMode`.
-3. **DataHub Instance** — the optional context graph storing course outlines,
-   accessibility flags, and telemetry.
+3. **DataHub** — the context graph. Reads and write-backs are attempted through the
+   **DataHub MCP Server** first (`search_documents` → `search` → `get_entities`,
+   write-backs via `save_document` + `update_description`), then the **real GMS GraphQL
+   API** (`search` + `dataset`), then **local mock data**. See
+   `examples/datahub_mcp_tool_calls.json` for the exact tool sequence.
+
+```text
+Resolution order:  MCP Server  ->  DataHub GMS GraphQL  ->  LOCAL MOCK
+                   (never throws on any upstream failure)
+```
 
 **Mock fallback guarantee:** when no relay or DataHub configuration exists,
 `fetchMetadata` returns offline catalog data without issuing a single network
 request, so the app cannot crash from a missing backend.
+
+### 1b. Seed Real Data into DataHub
+
+```bash
+DATAHUB_GMS_URL=http://localhost:8080 npx tsx server/scripts/seedDatahub.ts
+# or: npm run seed:datahub
+```
+
+Creates the EduAudio lesson catalog (Datasets with `datasetProperties`, `ownership`,
+`domains`, and `schemaMetadata`) plus the `urn:li:domain:education` Domain through
+DataHub's batch ingest endpoint (`POST /api/entities/v1?action=create`). Point the
+relay at the same GMS (`DATAHUB_GMS_URL` + `DATAHUB_PAT_TOKEN`) or at the DataHub MCP
+Server (`DATAHUB_MCP_URL` / `DATAHUB_MCP_COMMAND` + `DATAHUB_LESSON_URN`) and the app
+reads real metadata end-to-end.
 
 ### 2. Install & Test the Android APK
 
@@ -112,6 +137,7 @@ the AI Teacher flow: touch & hold anywhere → speak → release to send the com
 
 The `examples/` directory contains the sample DataHub payloads used during evaluation:
 
+*   `examples/datahub_mcp_tool_calls.json` — the exact DataHub MCP Server tool sequence for reads + write-backs.
 *   `examples/datahub_schema_response.json` — dataset/audio-course schema metadata read from DataHub.
 *   `examples/datahub_metadata_response.json` — document outline + accessibility metadata GraphQL response.
 *   `examples/datahub_telemetry_writeback.json` — raw voice-session telemetry write-back payload.
@@ -132,13 +158,20 @@ curl -X POST http://localhost:3001/api/datahub/query \
 curl -X POST http://localhost:3001/api/datahub/telemetry \
   -H "Content-Type: application/json" \
   -d @examples/datahub_telemetry_writeback.json
+curl http://localhost:3001/api/datahub/insights
+curl -X POST http://localhost:3001/api/datahub/insights/flush
 ```
 
 To point the mobile app at a deployed relay, create a `.env.local` file:
 
 ```
-EXPO_PUBLIC_API_URL=https://eduaudio-relay.onrender.com
+EXPO_PUBLIC_API_URL=https://eduaudio.onrender.com
 ```
+
+Live deployments:
+
+*   Frontend (web SPA): `https://eduaudio.onrender.com`
+*   Backend relay: `https://eduaudio-backend.onrender.com` (`/api/health`)
 
 ---
 
