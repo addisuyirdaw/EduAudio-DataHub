@@ -1,0 +1,78 @@
+{
+  "description": "Example DataHub MCP Server tool calls issued by the EduAudio backend relay (server/services/DataHubService.ts) over the Model Context Protocol. Every metadata read and telemetry write-back routes through the MCP Server interface first; the relay falls back to GraphQL, then local mock data.",
+  "server": "acryldata/mcp-server-datahub (mcp-server-datahub, via DATAHUB_MCP_COMMAND=uvx mcp-server-datahub@latest or DATAHUB_MCP_URL)",
+  "transport": "stdio / streamable-http (JSON-RPC 2.0)",
+  "toolCalls": [
+    {
+      "step": 1,
+      "direction": "READ",
+      "tool": "search_documents",
+      "arguments": {
+        "query": "intro-cognitive-psychology"
+      },
+      "purpose": "Discover the course document in the DataHub knowledge catalog",
+      "response": {
+        "results": [
+          {
+            "urn": "urn:li:document:edu-intro-cognitive-psychology",
+            "name": "Introduction to Cognitive Psychology",
+            "description": "Chapter 3: Memory & Learning — outline and accessibility metadata"
+          },
+          {
+            "urn": "urn:li:document:edu-cognitive-psych-ch3",
+            "name": "Chapter 3: Memory & Learning",
+            "description": "Sections: encoding, storage, retrieval, and accessibility profiles"
+          }
+        ]
+      }
+    },
+    {
+      "step": 2,
+      "direction": "READ",
+      "tool": "get_entities",
+      "arguments": {
+        "urns": [
+          "urn:li:document:edu-intro-cognitive-psychology",
+          "urn:li:document:edu-cognitive-psych-ch3"
+        ]
+      },
+      "purpose": "Fetch detailed outline / headings / schema metadata for the mapped outline",
+      "response": {
+        "entities": {
+          "urn:li:document:edu-intro-cognitive-psychology": {
+            "name": "Introduction to Cognitive Psychology",
+            "properties": {
+              "headings": ["Preface", "Chapter 1: Educational Foundations", "1.1 Accessibility Standards"],
+              "accessibility": { "hasTranscript": true, "isScreenReaderOptimized": true }
+            }
+          }
+        }
+      }
+    },
+    {
+      "step": 3,
+      "direction": "WRITE",
+      "tool": "save_document",
+      "arguments": {
+        "title": "EduAudio Voice Session sess_0f9a41c8-2b3d-4e6a-9f01-eduaudio-7f2e",
+        "content": "EduAudio voice session sess_0f9a41c8-2b3d-4e6a-9f01-eduaudio-7f2e. Intent: go to page twelve. Duration: 482.0s. Document: urn:li:dataset:(urn:li:dataPlatform:eduCourse,QuantumMechanics101_lesson4,PROD).\n\n```json\n{ \"eventType\": \"EDUAUDIO_VOICE_SESSION_TELEMETRY\", \"session\": { \"sessionId\": \"sess_0f9a41c8-2b3d-4e6a-9f01-eduaudio-7f2e\" }, \"voiceInteractions\": [ { \"sequence\": 1, \"recognizedCommand\": \"go to page twelve\", \"parsedAction\": { \"type\": \"NAVIGATE\", \"targetPage\": 12 } } ] }\n```"
+      },
+      "purpose": "Contribute knowledge back to the DataHub context graph so the next person or agent inherits the session",
+      "response": {
+        "saved": true,
+        "parentTitle": "Shared"
+      }
+    }
+  ],
+  "fallbackChain": [
+    "1. MCP Server (search_documents / get_entities / save_document)",
+    "2. DataHub GraphQL relay (server/services/DataHubService.ts fetchViaGraphQl)",
+    "3. LOCAL MOCK catalog (server/services/DataHubService.ts buildMockDocument)"
+  ],
+  "diagnostics": [
+    "[DataHubMcp] MCP Server path ACTIVE (stdio (uvx mcp-server-datahub@latest))",
+    "[DataHubMcp] MCP server advertises 9 tools: search_documents, grep_documents, get_entities, list_schema_fields, get_lineage, get_dataset_queries, get_me, save_document, update_description",
+    "[DataHubMcp] Calling DataHub MCP tool \"search_documents\" args={\"query\":\"intro-cognitive-psychology\"}",
+    "[DataHubService] MCP returned 2 document(s) for \"intro-cognitive-psychology\"; serving as outline."
+  ]
+}
