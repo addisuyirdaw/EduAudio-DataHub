@@ -10,12 +10,15 @@
 #    is not configured (see server/index.ts).
 # 2. Frontend Expo web static site — SPA export (see package.json
 #    "build:web") with EXPO_PUBLIC_API_URL inlined at build time.
+#
+# Per the Render Blueprint spec, static sites use type: web with
+# runtime: static (there is no type: static).
 
 services:
   # 1. Backend Express API Relay
   - type: web
     name: eduaudio-backend
-    env: node
+    runtime: node
     plan: free
     buildCommand: npm install --legacy-peer-deps
     startCommand: npx tsx server/index.ts
@@ -27,8 +30,9 @@ services:
         value: 20
 
   # 2. Frontend Expo Web Static Site
-  - type: static
+  - type: web
     name: eduaudio-frontend
+    runtime: static
     buildCommand: npm run build:web
     staticPublishPath: ./dist
     envVars:
