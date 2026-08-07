@@ -31,7 +31,7 @@ services:
 
   # 2. Frontend Expo Web Static Site
   - type: web
-    name: eduaudio-frontend
+    name: eduaudio
     runtime: static
     buildCommand: npm run build:web
     staticPublishPath: ./dist
