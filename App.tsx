@@ -60,35 +60,64 @@ export default function App() {
   }, []);
 
   /**
-   * Spoken confirmation of a mode change. Switching to the AI Teacher skips
-   * the announcement because the teacher always greets / starts reading out
-   * loud the moment it mounts, which already confirms the new mode.
+   * Spoken confirmation of a mode change: "Switched to [Audio Player / AI
+   * Teacher]. How can I help?" Resolves only when the announcement finishes
+   * speaking (or is interrupted / errors), so callers can order the screen
+   * swap relative to the speech.
    */
   const announceMode = useCallback(async (nextMode: Mode): Promise<void> => {
-    if (nextMode === 'teacher') return;
-    try {
-      await Speech.stop();
-      Speech.speak('Audio player mode. Press T to switch back to the AI teacher.', {
-        language: 'en-US',
-        rate: 0.95,
-      });
-    } catch (error) {
-      console.warn('[App] Mode announcement failed:', error);
-    }
+    const label = nextMode === 'player' ? 'Audio Player' : 'AI Teacher';
+    await Speech.stop();
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      let safety: ReturnType<typeof setTimeout>;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(safety);
+        resolve();
+      };
+      safety = setTimeout(() => {
+        console.warn('[App] Mode announcement timed out.');
+        settle();
+      }, 10000);
+      try {
+        Speech.speak(`Switched to ${label}. How can I help?`, {
+          language: 'en-US',
+          rate: 0.95,
+          onDone: settle,
+          onStopped: settle,
+          onError: () => {
+            console.warn('[App] Mode announcement error.');
+            settle();
+          },
+        });
+      } catch (error) {
+        console.warn('[App] Mode announcement failed:', error);
+        settle();
+      }
+    });
   }, []);
 
   /**
    * Audio isolation on tab switch: stop any in-flight TTS / mutex-tracked
-   * playback before the screen swap, so the AI Teacher's spoken greeting never
-   * bleeds into the player and vice-versa. The Audio Player's own sound is
-   * stopped by its unmount cleanup. Announces the new mode out loud.
+   * playback before the screen swap, then announce the new mode out loud.
+   * When entering the AI Teacher - which mounts silently and immediately opens
+   * the mic, whose start handler silences TTS - the confirmation is spoken
+   * BEFORE the swap so the mic never cuts it off. The Audio Player has no mic,
+   * so its announcement can safely play after the swap.
    */
   const switchMode = useCallback(async (nextMode: Mode): Promise<void> => {
     if (modeRef.current === nextMode) return;
     await audioMutex.hardPause();
+    if (nextMode === 'teacher') {
+      await announceMode(nextMode);
+    }
     modeRef.current = nextMode;
     setMode(nextMode);
-    await announceMode(nextMode);
+    if (nextMode === 'player') {
+      void announceMode(nextMode);
+    }
   }, [announceMode]);
 
   // 'T' hotkey toggles between Audio Player and AI Teacher (web builds) for
@@ -119,17 +148,14 @@ export default function App() {
   }, [switchMode]);
 
   /**
-   * Spacebar / M on the AUDIO PLAYER tab: stop playback immediately and hand
-   * the speech input to the AI Teacher (which mounts, greets, and opens the
-   * hands-free listening loop).
+   * Spacebar / M on the AUDIO PLAYER tab: switch to the AI Teacher through the
+   * shared switchMode path (audio isolation + spoken confirmation). The
+   * teacher then mounts silently and opens the hands-free mic for the student
+   * to speak.
    */
   useKeyboardPTT(
     () => {
-      void (async () => {
-        await audioMutex.hardPause();
-        setMode('teacher');
-        modeRef.current = 'teacher';
-      })();
+      void switchMode('teacher');
     },
     () => {},
     mode === 'player'

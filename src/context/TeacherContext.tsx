@@ -39,12 +39,6 @@ const DEFAULT_LESSON_TITLE = 'Computer Science 101 - Intro to Data Structures';
 const DEFAULT_LESSON_ID = 'cs101-intro-data-structures';
 
 /**
- * Module-level flag so the auto-speak greeting plays once per app session
- * (the TeacherProvider remounts on every tab switch to AI Teacher).
- */
-let autoGreetingPlayed = false;
-
-/**
  * Build a complete lesson document so the AI Teacher always has real content
  * to render ("PAGE X OF Y" + page text) even before a real PDF is parsed.
  * Uses verified DataHub metadata headings when available.
@@ -144,6 +138,16 @@ function resolveModeSwitch(text: string): ModeRequest | null {
 }
 
 /**
+ * Detect a friendly greeting ("hello", "hi", "hey", "good morning") in spoken
+ * or typed command text. Word-boundary matching avoids matching inside other
+ * words like "this" or "history".
+ */
+function detectGreeting(text: string): boolean {
+  const cleanText = text.toLowerCase().trim();
+  return /(?:^|\W)(?:hello|hi|hey|good morning|good afternoon|good evening)(?:$|\W)/.test(cleanText);
+}
+
+/**
  * Teacher Context Provider
  * Implements the FSM and provides actions for state transitions
  */
@@ -184,18 +188,12 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     }
   }, []);
 
-  // Zero-touch accessibility entry: greet + read Page 1 the first time the
-  // AI Teacher is opened; resume reading hands-free on subsequent entries.
+  // Passive, student-led entry: no auto speech. Silently open the hands-free
+  // microphone so the student drives the lesson with their voice - "hello"
+  // for a warm greeting, "read page 1" to start the lesson, "summarize the
+  // chapter" for an overview, or "next" / "back" to navigate.
   useEffect(() => {
-    if (!autoGreetingPlayed) {
-      autoGreetingPlayed = true;
-      void startGreeting();
-    } else {
-      const doc = documentRef.current;
-      if (doc) {
-        void startReading({ startPage: 1, endPage: doc.totalPages, type: 'pages' });
-      }
-    }
+    void rearmAutoListen();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -338,25 +336,45 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   }, [transitionState]);
 
   /**
-   * Zero-touch entry: speak the welcome greeting followed immediately by
-   * Page 1's text, then re-arm the mic for spoken navigation commands.
+   * Warm spoken response to a friendly greeting ("hello", "hi", "hey").
+   * Re-arms the mic afterwards so the student can immediately say what they
+   * want to do next. This replaces the old auto-greeting on mount: the engine
+   * is now passive and only speaks when the student speaks first.
    */
-  const startGreeting = useCallback(async () => {
-    const doc = documentRef.current;
-    if (!doc || doc.totalPages < 1) return;
-
-    handledPageRef.current = 1;
-    setCurrentPage(1);
+  const respondToGreeting = useCallback(async () => {
     transitionState('AI_SPEAKING');
-    const greeting =
-      `Welcome to EduAudio! I am your AI Teacher. Everything you hear can be controlled ` +
-      `with your voice. Say next to go on, say again to repeat this page, say back to go ` +
-      `back, or say player to switch to the audio player. You can also ask me any question. ` +
-      `Let's begin with page one.`;
-    await speakSilently(greeting);
-    const pageText = doc.pages[0]?.text ?? '';
-    await speakSilently(buildPageNarration(pageText, 1, doc.totalPages));
-    handledPageRef.current = 0;
+    await speakSilently(
+      "Hello! I'm your AI Teacher. What would you like to do today? " +
+      "You can ask me to start reading page 1, summarize the chapter, or switch modes."
+    );
+    transitionState('PAUSED');
+    await rearmAutoListen();
+  }, [speakSilently, transitionState, rearmAutoListen]);
+
+  /**
+   * Speak a spoken chapter outline / summary of the loaded lesson, then
+   * re-arm the hands-free microphone so the student can pick a starting
+   * point.
+   */
+  const summarizeChapter = useCallback(async () => {
+    const doc = documentRef.current;
+    if (!doc || doc.totalPages < 1) {
+      await speakSilently("No lesson is loaded yet. Say start teaching to begin.");
+      transitionState('PAUSED');
+      await rearmAutoListen();
+      return;
+    }
+
+    const sectionNames = doc.pages
+      .map((page) => page.headings?.[0]?.text ?? `Page ${page.pageNumber}`)
+      .filter(Boolean);
+    const outline = sectionNames.join('. ');
+    const summary =
+      `Here is a summary of ${doc.title}. The lesson has ${doc.totalPages} pages and covers ${outline}. ` +
+      `Would you like me to start reading from page one?`;
+
+    await speakSilently(summary);
+    transitionState('PAUSED');
     await rearmAutoListen();
   }, [speakSilently, transitionState, rearmAutoListen]);
 
@@ -537,6 +555,13 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   const processCommandText = useCallback(async (text: string): Promise<void> => {
     const trimmed = text.trim();
 
+    // Friendly greetings ("hello", "hi") get a warm spoken response instead of
+    // being treated as an AI question.
+    if (detectGreeting(trimmed)) {
+      await respondToGreeting();
+      return;
+    }
+
     // Mode-switch commands (spoken or typed): hand off to the top-level mode
     // bridge, which swaps screens, isolates audio, and speaks the new mode.
     const modeRequest = resolveModeSwitch(trimmed);
@@ -565,6 +590,44 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     const page = currentPage;
 
     switch (action.type) {
+      case 'START': {
+        // "read page 1", "start teaching", "begin lesson": read exactly one
+        // page aloud (student-paced), then pause for the student's choice.
+        const target = typeof action.parameters?.target === 'number' ? action.parameters.target : 1;
+        if (doc) {
+          await startReading({ startPage: target, endPage: doc.totalPages, type: 'pages' });
+        } else {
+          await speakSilently("No lesson is loaded yet. Say summarize the chapter to hear what's available.");
+          transitionState('PAUSED');
+          await rearmAutoListen();
+        }
+        break;
+      }
+      case 'GO_TO': {
+        // "go to page 2", "page 5": page change only - the auto-read currentPage
+        // effect stops any in-flight TTS, reads the new page aloud, and re-arms.
+        const target = typeof action.parameters?.target === 'number' ? action.parameters.target : 0;
+        if (!doc) {
+          await speakSilently("No lesson is loaded yet. Say start teaching to begin.");
+          transitionState('PAUSED');
+          await rearmAutoListen();
+        } else if (target < 1 || target > doc.totalPages) {
+          await speakSilently(`I could not find page ${target}. This lesson has ${doc.totalPages} pages.`);
+          transitionState('PAUSED');
+          await rearmAutoListen();
+        } else if (target === page) {
+          await speakSilently(`We are already on page ${target}.`);
+          transitionState('PAUSED');
+          await rearmAutoListen();
+        } else {
+          setCurrentPage(target);
+          transitionState('PAUSED');
+        }
+        break;
+      }
+      case 'SUMMARIZE':
+        await summarizeChapter();
+        break;
       case 'RESUME':
         if (doc && page >= 1) {
           await startReading({ startPage: page, endPage: doc.totalPages, type: 'pages' });
@@ -617,12 +680,12 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
         break;
       case 'UNKNOWN':
       default:
-        await speakSilently("I didn't catch that. Say 'next' to continue, 'back' to go back, or 'repeat' to hear this page again.");
+        await speakSilently("I didn't catch that. Say 'read page one' to start, 'next' to continue, 'again' to repeat, or 'summarize' for an overview.");
         transitionState('PAUSED');
         await rearmAutoListen();
         break;
     }
-  }, [currentPage, transitionState, speakSilently, askQuestion, startReading, rearmAutoListen]);
+  }, [currentPage, transitionState, speakSilently, askQuestion, startReading, rearmAutoListen, respondToGreeting, summarizeChapter]);
 
   /**
    * Process onboarding input (Subject -> Unit -> Topic).

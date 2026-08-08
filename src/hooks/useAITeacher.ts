@@ -87,6 +87,8 @@ export function useAITeacher(): UseAITeacherReturn {
    * waits for the speech session to end. Page-navigation commands reuse the
    * FSM command router; mode-switch commands are handed to the top-level mode
    * bridge, which swaps screens, isolates audio, and speaks the new mode.
+   * Greetings forward the full spoken sentence so the teacher engine can give
+   * a warm response instead of treating "hello" as a question.
    */
   const handleLiveCommand = useCallback(async (command: LiveVoiceCommand, transcript: string) => {
     liveCommandHandledRef.current = true;
@@ -96,7 +98,7 @@ export function useAITeacher(): UseAITeacherReturn {
       return;
     }
     try {
-      await context.submitTextCommand(command);
+      await context.submitTextCommand(command === 'greeting' ? transcript : command);
     } catch (error) {
       console.error('[useAITeacher] Live command error:', error);
     }

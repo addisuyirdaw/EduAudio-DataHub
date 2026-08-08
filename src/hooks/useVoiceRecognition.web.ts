@@ -51,9 +51,10 @@ export interface StartListeningOptions {
 /**
  * Commands triggered instantly on live transcript keyword matches.
  * 'player' / 'teacher' are mode-switch requests handed to the top-level
- * mode bridge; the rest are page-navigation commands.
+ * mode bridge; 'greeting' routes the full sentence to the teacher engine
+ * for a friendly spoken response; the rest are page-navigation commands.
  */
-export type LiveVoiceCommand = 'next' | 'back' | 'repeat' | 'player' | 'teacher';
+export type LiveVoiceCommand = 'next' | 'back' | 'repeat' | 'player' | 'teacher' | 'greeting';
 
 /**
  * Resolve an instant navigation keyword from the live transcript.
@@ -64,6 +65,9 @@ function resolveLiveCommand(cleanText: string): LiveVoiceCommand | null {
   if (/(?:^|\W)(?:next|continue|forward)(?:$|\W)/.test(cleanText)) return 'next';
   if (/(?:^|\W)(?:back|previous)(?:$|\W)/.test(cleanText)) return 'back';
   if (/(?:^|\W)(?:repeat|again)(?:$|\W)/.test(cleanText)) return 'repeat';
+  // Greetings are checked before mode words so "hi teacher" greets instead
+  // of being swallowed by the (no-op) teacher mode-switch request.
+  if (/(?:^|\W)(?:hello|hi|hey|good morning|good afternoon|good evening)(?:$|\W)/.test(cleanText)) return 'greeting';
   if (/(?:^|\W)(?:player)(?:$|\W)/.test(cleanText)) return 'player';
   if (/(?:^|\W)(?:teacher)(?:$|\W)/.test(cleanText)) return 'teacher';
   return null;

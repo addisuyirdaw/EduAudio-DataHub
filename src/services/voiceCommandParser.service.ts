@@ -21,6 +21,9 @@ export type VoiceCommandType =
   | 'NEXT'            // Skip to next paragraph/page
   | 'BACK'            // Go back to previous paragraph/page
   | 'REPEAT'          // Repeat current content
+  | 'START'           // Start teaching / read a page aloud
+  | 'GO_TO'           // Jump to a specific page
+  | 'SUMMARIZE'       // Summarize the current lesson/chapter
   | 'AI_QUERY'        // Query requiring AI processing
   | 'UNKNOWN';        // Unrecognized command
 
@@ -33,8 +36,8 @@ export interface ParsedVoiceCommand {
   requiresNetwork: boolean;   // Requires network connection
   originalText: string;
   parameters?: {
-    amount?: number;         // For "next 2 paragraphs"
-    target?: string;         // For "go to chapter 3"
+    amount?: number;          // For "next 2 paragraphs"
+    target?: string | number; // For "go to chapter 3" (string) / "go to page 3" (number)
   };
 }
 
@@ -54,17 +57,60 @@ class VoiceCommandParserService {
     // Pause/Stop commands
     { pattern: /^(pause|stop|halt|wait|hold)\b/i, type: 'PAUSE', isLocal: true },
     { pattern: /^(stop|end|quit|exit)\b/i, type: 'STOP', isLocal: true },
-    
+
+    // Direct page jumps: "go to page 3", "jump to page 2", "page 5"
+    { pattern: /^(?:go|jump|open|move)\b.*\b(?:to|page)\s*(\d+)\b/i, type: 'GO_TO', isLocal: true },
+    { pattern: /^page\s*(\d+)\b/i, type: 'GO_TO', isLocal: true },
+
+    // Start / read-aloud commands: "start teaching", "begin lesson", "read page 1"
+    { pattern: /^(?:read|start|begin)\b/i, type: 'START', isLocal: true },
+
     // Resume commands
-    { pattern: /^(resume|continue|play|start|go)\b/i, type: 'RESUME', isLocal: true },
-    
+    { pattern: /^(resume|play)\b/i, type: 'RESUME', isLocal: true },
+
     // Navigation commands
-    { pattern: /^(next|skip|forward|ahead)\b(\s+(\d+))?/i, type: 'NEXT', isLocal: true },
+    { pattern: /^(next|skip|forward|ahead|continue)\b(\s+(\d+))?/i, type: 'NEXT', isLocal: true },
     { pattern: /^(back|previous|rewind|go back)\b(\s+(\d+))?/i, type: 'BACK', isLocal: true },
-    
+
     // Repeat commands
     { pattern: /^(repeat|again|say that again|what did you say)\b/i, type: 'REPEAT', isLocal: true },
+
+    // Summarize commands
+    { pattern: /^(summarize|summary|summarise|recap)\b/i, type: 'SUMMARIZE', isLocal: true },
   ];
+
+  /**
+   * Extract command parameters from a matched command. Group indices depend on
+   * each pattern's capture groups (NEXT/BACK use group 3 for the amount;
+   * GO_TO uses group 1 for the target page; START scans the raw text for a
+   * page number like "read page 1").
+   */
+  private extractParameters(
+    type: VoiceCommandType,
+    match: RegExpMatchArray,
+    text: string
+  ): ParsedVoiceCommand['parameters'] | undefined {
+    switch (type) {
+      case 'NEXT':
+      case 'BACK': {
+        const amount = match[3] ? parseInt(match[3], 10) : undefined;
+        return amount ? { amount } : undefined;
+      }
+      case 'GO_TO': {
+        const target = match[1] ? parseInt(match[1], 10) : undefined;
+        return target ? { target } : undefined;
+      }
+      case 'START': {
+        const pageMatch = text.match(/(?:^|\W)(?:page|at|from)\s*(\d+)\b/);
+        if (pageMatch) {
+          return { target: parseInt(pageMatch[1], 10) };
+        }
+        return undefined;
+      }
+      default:
+        return undefined;
+    }
+  }
 
   /**
    * Check if device is online
@@ -97,10 +143,9 @@ class VoiceCommandParserService {
         };
 
         // Extract parameters if present
-        if (match[3]) {
-          result.parameters = {
-            amount: parseInt(match[3], 10),
-          };
+        const parameters = this.extractParameters(type, match, trimmedText);
+        if (parameters) {
+          result.parameters = parameters;
         }
 
         console.log(`[VoiceCommandParser] Matched local command: ${type}`, result);
