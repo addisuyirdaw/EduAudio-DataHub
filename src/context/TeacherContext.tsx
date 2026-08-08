@@ -62,7 +62,7 @@ function buildLessonDocument(topicId: string, title: string, metadata: Education
         ];
 
   const pages: ParsedPage[] = headings.map((heading, index) => {
-    const text = buildPageText(title, heading.text, index + 1);
+    const text = buildPageText(heading.text);
     return {
       pageNumber: index + 1,
       text,
@@ -86,20 +86,50 @@ function buildLessonDocument(topicId: string, title: string, metadata: Education
   };
 }
 
-function buildPageText(title: string, heading: string, page: number): string {
-  return `${title}. ${heading}. This is page ${page} of the lesson. ${heading} is explained in an accessible, step by step format so you can follow along hands free. Ask me to repeat any section, or say "next" to continue.`;
+/**
+ * Human-style, plain-language explanations used to build the default lesson
+ * pages. Written the way a tutor would explain a concept out loud, so the
+ * voice experience feels natural for a blind student following along hands
+ * free.
+ */
+const TOPIC_EXPLANATIONS: Record<string, string> = {
+  'Introduction to Data Structures':
+    'A data structure is a way of organizing and storing information in your computer so it can be used efficiently. Think of it like a well organized toolbox, where every tool has a clear place and purpose.',
+  'Arrays and Lists':
+    'An array stores many items of the same kind in a row, one after another. Each item has a position called an index, so finding any item is fast and simple.',
+  'Stacks and Queues':
+    'A stack is like a stack of plates, where you always take the top one first. A queue is like a line at the store, where the first person in line is served first.',
+  'Trees and Graphs':
+    'A tree organizes items in levels, like a family tree, with branches leading down from a single root. A graph lets items called nodes connect freely, like roads on a map.',
+  'Review and Practice':
+    'Now we bring everything together. Feel free to ask me to explain any topic again, or ask me any question about what we have covered.',
+};
+
+function buildPageText(heading: string): string {
+  const explanation =
+    TOPIC_EXPLANATIONS[heading] ?? TOPIC_EXPLANATIONS['Introduction to Data Structures'];
+  return `${heading}. ${explanation}`;
 }
 
 /**
- * Short spoken prompt for a page. Kept deliberately brief so the tutor hooks
- * attention with a single actionable instruction instead of reading the full
- * page out loud (which drags on and loses engagement).
+ * The spoken options offered at the end of every page reading, so the student
+ * always knows what they can say next. Kept short so it never overwhelms.
  */
-function buildPagePrompt(page: number, totalPages: number): string {
+function buildPageAsk(): string {
   return (
-    `Page ${page} of ${totalPages}. Would you like to learn this page, or go next? ` +
+    `Would you like to go to the next page, hear this page again, or go back to the previous page? ` +
     `Say next to continue, say again to repeat, or say back for the previous page.`
   );
+}
+
+/**
+ * Full spoken narration for a page: announce the page, read the actual lesson
+ * content out loud like a human tutor, then pause with a spoken prompt
+ * offering next / repeat / back. The AI never advances to the next page on its
+ * own - it always waits for the student to choose.
+ */
+function buildPageNarration(pageText: string, page: number, totalPages: number): string {
+  return `Page ${page} of ${totalPages}. ${pageText} ${buildPageAsk()}`;
 }
 
 /**
@@ -187,12 +217,13 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
 
     const doc = documentRef.current;
     console.log(`[TeacherContext] Page changed to ${currentPage}, auto-reading`);
+    const pageText = doc.pages[currentPage - 1]?.text ?? '';
     void (async () => {
       await audioMutex.hardPause();
       if (stateTransitionRef.current !== 'ONBOARDING') {
         transitionState('AI_SPEAKING');
       }
-      await speakSilently(buildPagePrompt(currentPage, doc.totalPages));
+      await speakSilently(buildPageNarration(pageText, currentPage, doc.totalPages));
       if (stateTransitionRef.current !== 'ONBOARDING') {
         await rearmAutoListen();
       }
@@ -318,11 +349,14 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     setCurrentPage(1);
     transitionState('AI_SPEAKING');
     const greeting =
-      `Welcome to EduAudio! I am your AI Teacher. Press Spacebar or speak commands to navigate. ` +
-      `Would you like to learn page 1 or go next? ` +
-      `Say next to continue, say again to repeat, or say back for the previous page. ` +
-      `To switch to the audio player, say player.`;
+      `Welcome to EduAudio! I am your AI Teacher. Everything you hear can be controlled ` +
+      `with your voice. Say next to go on, say again to repeat this page, say back to go ` +
+      `back, or say player to switch to the audio player. You can also ask me any question. ` +
+      `Let's begin with page one.`;
     await speakSilently(greeting);
+    const pageText = doc.pages[0]?.text ?? '';
+    await speakSilently(buildPageNarration(pageText, 1, doc.totalPages));
+    handledPageRef.current = 0;
     await rearmAutoListen();
   }, [speakSilently, transitionState, rearmAutoListen]);
 
@@ -362,6 +396,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       handledPageRef.current = 1;
       transitionState('PAUSED');
       await speakSilently("Document loaded and verified. I'm ready when you are.");
+      handledPageRef.current = 0;
     } catch (error) {
       console.error('[TeacherContext] Document loading failed:', error);
       setErrorMessage(error instanceof Error ? error.message : 'Failed to load document');
@@ -381,33 +416,32 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       return;
     }
 
+    // Read exactly ONE page, then pause for the student. The lesson is
+    // student-paced: the AI never auto-advances to the next page on its own.
+    // It reads the page, offers next / repeat / back, and re-arms the mic so
+    // the student decides what happens next.
     stopReadingRef.current = false;
-    const endPage = Math.min(range.endPage, doc.totalPages);
-    let interrupted = false;
-    for (let page = range.startPage; page <= endPage; page++) {
-      const pageText = doc.pages[page - 1]?.text;
-      if (!pageText) break;
-      // The loop speaks each page itself; mark it so the auto-read effect
-      // does not double-announce the same page.
-      handledPageRef.current = page;
-      setCurrentPage(page);
-      // Speak a short instructional prompt, not the full page text, so the
-      // demo stays snappy and the user (or judge) always knows the next step.
-      await speakSilently(buildPagePrompt(page, doc.totalPages));
-      if (stopReadingRef.current) {
-        stopReadingRef.current = false;
-        interrupted = true;
-        break;
-      }
+    const page = Math.min(Math.max(range.startPage, 1), doc.totalPages);
+    const pageText = doc.pages[page - 1]?.text;
+    if (!pageText) {
+      transitionState('PAUSED');
+      return;
     }
 
-    // Only fall back to PAUSED on natural completion; an interruption already
-    // moved the FSM to LISTENING (the fromState guard makes this safe).
+    // Mark this page as handled so the auto-read effect does not announce it
+    // a second time, then speak the full narration (content + options).
+    handledPageRef.current = page;
+    setCurrentPage(page);
+    await speakSilently(buildPageNarration(pageText, page, doc.totalPages));
     handledPageRef.current = 0;
-    if (!interrupted) {
+
+    // Speak-then-listen: after the page finishes, open the mic hands-free so
+    // the student can choose next, repeat, back, or ask a question.
+    if (!stopReadingRef.current) {
       transitionState('PAUSED', 'AI_SPEAKING');
-      // Speak-then-listen: after the page finishes, open the mic hands-free.
       await rearmAutoListen();
+    } else {
+      stopReadingRef.current = false;
     }
   }, [transitionState, speakSilently, rearmAutoListen]);
 
@@ -563,7 +597,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
         break;
       case 'REPEAT':
         if (doc && page >= 1 && doc.pages[page - 1]?.text) {
-          await speakSilently(buildPagePrompt(page, doc.totalPages));
+          await speakSilently(buildPageNarration(doc.pages[page - 1].text, page, doc.totalPages));
         } else {
           await speakSilently("There is no content to repeat yet. Say next to continue.");
         }
@@ -572,7 +606,14 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
         break;
       case 'PAUSE':
       case 'STOP':
+        // A blind student may want to stop the reading and immediately ask a
+        // question. Stop any in-flight TTS, then re-arm the mic so their next
+        // words (e.g. a question) are heard.
+        stopReadingRef.current = true;
+        await Speech.stop();
+        await audioMutex.releaseTTSLock();
         transitionState('PAUSED');
+        await rearmAutoListen();
         break;
       case 'UNKNOWN':
       default:
