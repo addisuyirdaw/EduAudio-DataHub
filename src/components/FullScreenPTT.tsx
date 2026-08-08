@@ -18,17 +18,18 @@
 import React, { useRef, useEffect } from 'react';
 import { View, StyleSheet, Text, PanResponder, Dimensions } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import { Colors, Spacing, MIN_TOUCH_TARGET } from '../styles/theme';
+import { Colors, Spacing, Typography, MIN_TOUCH_TARGET } from '../styles/theme';
 
 interface FullScreenPTTProps {
   onPressIn: () => void;
   onPressOut: () => void;
   isActive: boolean;
+  transcript?: string;
 }
 
 const GLANCING_TOUCH_THRESHOLD = 150; // ms - filter out accidental taps
 
-export const FullScreenPTT: React.FC<FullScreenPTTProps> = ({ onPressIn, onPressOut, isActive }) => {
+export const FullScreenPTT: React.FC<FullScreenPTTProps> = ({ onPressIn, onPressOut, isActive, transcript }) => {
   const touchStartTimeRef = useRef<number>(0);
   const touchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -118,6 +119,11 @@ export const FullScreenPTT: React.FC<FullScreenPTTProps> = ({ onPressIn, onPress
           <View style={styles.pulseRing} />
           <View style={styles.pulseRingOuter} />
           <Text style={styles.listeningText}>Listening...</Text>
+          {/* Live transcript debugger: shows exactly what the browser speech
+              engine is capturing, updating on every interim result. */}
+          <Text style={styles.debugTranscript}>
+            Heard: "{transcript || 'Listening...'}"
+          </Text>
         </View>
       )}
     </View>
@@ -170,5 +176,13 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginTop: Spacing.lg,
     textAlign: 'center',
+  },
+  debugTranscript: {
+    color: Colors.onSurface,
+    fontSize: Typography.size.md,
+    fontWeight: '400',
+    marginTop: Spacing.md,
+    textAlign: 'center',
+    paddingHorizontal: Spacing.lg,
   },
 });

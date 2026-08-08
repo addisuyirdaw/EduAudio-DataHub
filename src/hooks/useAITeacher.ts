@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTeacherContext } from '../context/TeacherContext';
-import { useVoiceRecognition } from './useVoiceRecognition';
+import { useVoiceRecognition, type LiveVoiceCommand } from './useVoiceRecognition';
 import { useTextToSpeech } from './useTextToSpeech';
 import { dataHubService } from '../services/DataHubService';
 import { recognitionBridge } from '../services/recognitionBridge';
@@ -60,6 +60,9 @@ export function useAITeacher(): UseAITeacherReturn {
   const [statusMessage, setStatusMessage] = useState('Ready to study');
   const isHoldingRef = useRef(false);
   const autoListenRef = useRef(false);
+  // Set when an instant keyword command (next/back/repeat) already performed
+  // page navigation, so the matching push-to-talk release does not re-run it.
+  const liveCommandHandledRef = useRef(false);
 
   /**
    * Hands-free capture: a recognized final transcript arrives straight from
@@ -77,6 +80,22 @@ export function useAITeacher(): UseAITeacherReturn {
     }
   }, [context, voiceRecognition]);
 
+  /**
+   * Instant keyword navigation: fired by the recognizer the moment a live
+   * transcript (interim or final) contains a navigation keyword, so page
+   * transitions never wait for the speech session to end. Reuses the FSM
+   * command router which advances the page and reads it aloud via TTS.
+   */
+  const handleLiveCommand = useCallback(async (command: LiveVoiceCommand, transcript: string) => {
+    liveCommandHandledRef.current = true;
+    console.log(`[useAITeacher] Live command: ${command} ("${transcript}")`);
+    try {
+      await context.submitTextCommand(command);
+    } catch (error) {
+      console.error('[useAITeacher] Live command error:', error);
+    }
+  }, [context]);
+
   // Speak-then-listen accessibility loop:
   //  - 'autoListen': greeting / page reading / command response finished ->
   //    re-arm the mic hands-free.
@@ -86,14 +105,19 @@ export function useAITeacher(): UseAITeacherReturn {
     return recognitionBridge.subscribe((reason) => {
       if (reason === 'autoListen') {
         autoListenRef.current = true;
-        void voiceRecognition.startListening({ onFinalResult: handleAutoCapture });
+        liveCommandHandledRef.current = false;
+        void voiceRecognition.startListening({
+          onFinalResult: handleAutoCapture,
+          onLiveCommand: handleLiveCommand,
+        });
       } else if (reason === 'ttsFinished') {
         if (isHoldingRef.current) {
-          void voiceRecognition.startListening();
+          liveCommandHandledRef.current = false;
+          void voiceRecognition.startListening({ onLiveCommand: handleLiveCommand });
         }
       }
     });
-  }, [voiceRecognition, handleAutoCapture]);
+  }, [voiceRecognition, handleAutoCapture, handleLiveCommand]);
 
   // Sync status messages with FSM state
   useEffect(() => {
@@ -128,16 +152,17 @@ export function useAITeacher(): UseAITeacherReturn {
   const handleTouchDown = useCallback(async () => {
     try {
       isHoldingRef.current = true;
+      liveCommandHandledRef.current = false;
       const shouldListen = await context.handleTouchDown();
       if (shouldListen) {
         // Let hardPause finish stopping TTS before the mic opens (audio focus).
         await new Promise((resolve) => setTimeout(resolve, 150));
-        await voiceRecognition.startListening();
+        await voiceRecognition.startListening({ onLiveCommand: handleLiveCommand });
       }
     } catch (error) {
       console.error('[useAITeacher] Touch down error:', error);
     }
-  }, [context, voiceRecognition]);
+  }, [context, voiceRecognition, handleLiveCommand]);
 
   /**
    * Handle touch up - process recognized speech
@@ -145,6 +170,12 @@ export function useAITeacher(): UseAITeacherReturn {
   const handleTouchUp = useCallback(async () => {
     try {
       isHoldingRef.current = false;
+      // A live keyword command already performed the navigation, so this
+      // release must not re-run the same command.
+      if (liveCommandHandledRef.current) {
+        liveCommandHandledRef.current = false;
+        return;
+      }
       const text = await voiceRecognition.stopListening();
 
       // Pass the text to context for FSM processing (onboarding or commands)

@@ -40,9 +40,29 @@ export interface UseVoiceRecognitionReturn {
 /**
  * Options for a single listening session. `onFinalResult` lets the auto-listen
  * loop (hands-free) process a recognized command without a push-to-talk press.
+ * `onLiveCommand` fires the instant a navigation keyword is heard (interim or
+ * final) so page transitions never wait for the speech session to end.
  */
 export interface StartListeningOptions {
   onFinalResult?: (text: string) => void;
+  onLiveCommand?: (command: LiveVoiceCommand, transcript: string) => void;
+}
+
+/**
+ * Navigation commands triggered instantly on live transcript keyword matches.
+ */
+export type LiveVoiceCommand = 'next' | 'back' | 'repeat';
+
+/**
+ * Resolve an instant navigation keyword from the live transcript.
+ * Word-boundary matching prevents false positives like "context" (contains
+ * "next") or "feedback" (contains "back") from skipping pages.
+ */
+function resolveLiveCommand(cleanText: string): LiveVoiceCommand | null {
+  if (/(?:^|\W)(?:next|continue|forward)(?:$|\W)/.test(cleanText)) return 'next';
+  if (/(?:^|\W)(?:back|previous)(?:$|\W)/.test(cleanText)) return 'back';
+  if (/(?:^|\W)(?:repeat|again)(?:$|\W)/.test(cleanText)) return 'repeat';
+  return null;
 }
 
 /**
@@ -88,6 +108,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const stopRequestedRef = useRef(false);
   const latestResultRef = useRef('');
   const finalResultRef = useRef<((text: string) => void) | null>(null);
+  const liveCommandRef = useRef<((command: LiveVoiceCommand, transcript: string) => void) | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const startListening = useCallback(async (options?: StartListeningOptions) => {
@@ -99,6 +120,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     if (activeRef.current) return;
 
     finalResultRef.current = options?.onFinalResult ?? null;
+    liveCommandRef.current = options?.onLiveCommand ?? null;
 
     try {
       setError(null);
@@ -190,16 +212,45 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
           if (result.isFinal) isFinal = true;
         }
       }
-      if (transcript) {
-        latestResultRef.current = transcript;
-        setRecognizedText(transcript);
-        // Blind accessibility: expose the live transcript immediately.
-        console.log('STT Captured:', transcript);
-        if (isFinal) {
-          // Hands-free auto-listen loop: hand the recognized command straight
-          // to the teacher engine without requiring a push-to-talk release.
-          finalResultRef.current?.(transcript);
+      if (!transcript) return;
+
+      latestResultRef.current = transcript;
+      setRecognizedText(transcript);
+      // Blind accessibility: expose the live transcript immediately.
+      console.log('STT Captured:', transcript);
+
+      // Real-time keyword evaluation: test the live transcript on every
+      // speech event (interim AND final) so page navigation doesn't wait for
+      // the speech session to end.
+      const cleanText = transcript.toLowerCase().trim();
+      const liveCommand = resolveLiveCommand(cleanText);
+
+      if (liveCommand && !stopRequestedRef.current) {
+        // Consume the command now: prevent re-firing on later result events.
+        stopRequestedRef.current = true;
+        keepAliveRef.current = false;
+        const handler = liveCommandRef.current;
+        liveCommandRef.current = null;
+        finalResultRef.current = null;
+
+        console.log(
+          `[VoiceRecognition.web] Live command matched: ${liveCommand} ("${cleanText}")`
+        );
+        if (handler) {
+          void (async () => {
+            const text = await stopListening();
+            handler(liveCommand, text || transcript);
+          })();
+        } else {
+          void stopListening();
         }
+        return;
+      }
+
+      if (isFinal) {
+        // Hands-free auto-listen loop: hand the recognized command straight
+        // to the teacher engine without requiring a push-to-talk release.
+        finalResultRef.current?.(transcript);
       }
     };
 
@@ -261,6 +312,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     keepAliveRef.current = false;
     stopRequestedRef.current = true;
     finalResultRef.current = null;
+    liveCommandRef.current = null;
 
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);
@@ -297,6 +349,8 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const destroy = useCallback(() => {
     keepAliveRef.current = false;
     stopRequestedRef.current = true;
+    finalResultRef.current = null;
+    liveCommandRef.current = null;
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;

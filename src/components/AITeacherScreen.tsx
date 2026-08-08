@@ -76,6 +76,7 @@ const AITeacherContent: React.FC = () => {
         onPressIn={handleTouchDown} 
         onPressOut={handleTouchUp} 
         isActive={state === 'LISTENING'} 
+        transcript={recognizedText}
       />
       
       {/* Invisible live region for screen reader announcements */}
