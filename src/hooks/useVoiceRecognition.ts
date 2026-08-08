@@ -29,10 +29,18 @@ export interface UseVoiceRecognitionReturn {
   isRecognizing: boolean;
   error: string | null;
 
-  startListening: () => Promise<void>;
+  startListening: (options?: StartListeningOptions) => Promise<void>;
   stopListening: () => Promise<string>;
   destroy: () => void;
   resetRecognizedText: () => void;
+}
+
+/**
+ * Options for a single listening session. `onFinalResult` lets the auto-listen
+ * loop (hands-free) process a recognized command without a push-to-talk press.
+ */
+export interface StartListeningOptions {
+  onFinalResult?: (text: string) => void;
 }
 
 const RESTART_DELAY_MS = 200;
@@ -50,10 +58,13 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const keepAliveRef = useRef(false);
   const stopRequestedRef = useRef(false);
   const latestResultRef = useRef('');
+  const finalResultRef = useRef<((text: string) => void) | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const startListening = useCallback(async () => {
+  const startListening = useCallback(async (options?: StartListeningOptions) => {
     if (activeRef.current) return;
+
+    finalResultRef.current = options?.onFinalResult ?? null;
 
     try {
       setError(null);
@@ -79,6 +90,17 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setError(error instanceof Error ? error.message : 'Failed to start listening');
       console.error('[VoiceRecognition] Start listening error:', error);
     }
+  }, []);
+
+  const isFatalError = useCallback((error: string): boolean => {
+    return (
+      error === 'not-allowed' ||
+      error === 'service-not-allowed' ||
+      error === 'not-supported' ||
+      error === 'audio-capture' ||
+      error === 'bad-grammar' ||
+      error === 'LanguageNotSupported'
+    );
   }, []);
 
   const scheduleRestart = useCallback(() => {
@@ -125,9 +147,15 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     setIsListening(false);
     setIsRecognizing(false);
     activeRef.current = false;
-    setError(JSON.stringify(e.error));
+    const raw = typeof e?.error === 'string' ? e.error : JSON.stringify(e?.error ?? e);
+    setError(raw);
     console.error('[VoiceRecognition] Speech recognition error:', e);
-    scheduleRestart();
+    if (isFatalError(raw)) {
+      keepAliveRef.current = false;
+      stopRequestedRef.current = true;
+    } else {
+      scheduleRestart();
+    }
   };
 
   const onSpeechResults = (e: any) => {
@@ -135,7 +163,10 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       const text = e.value[0];
       latestResultRef.current = text;
       setRecognizedText(text);
-      console.log('[VoiceRecognition] Speech result:', text);
+      console.log('STT Captured:', text);
+      // Hands-free auto-listen loop: hand the recognized command to the
+      // teacher engine without requiring a push-to-talk release.
+      finalResultRef.current?.(text);
     }
   };
 
@@ -189,6 +220,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const stopListening = useCallback(async (): Promise<string> => {
     keepAliveRef.current = false;
     stopRequestedRef.current = true;
+    finalResultRef.current = null;
 
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);

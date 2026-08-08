@@ -23,11 +23,14 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 /**
  * Attach global Spacebar / M key listeners that map press/hold to the
- * push-to-talk onPressIn / onPressOut callbacks. No-op on non-web platforms.
+ * push-to-talk onPressIn / onPressOut callbacks. When `enabled` is false the
+ * listeners are detached (used to keep the audio-player tab hotkey from
+ * colliding with the AI Teacher screen's own push-to-talk).
  */
 export function useKeyboardPTT(
   onPressIn: () => void,
-  onPressOut: () => void
+  onPressOut: () => void,
+  enabled: boolean = true
 ): void {
   const onPressInRef = useRef(onPressIn);
   const onPressOutRef = useRef(onPressOut);
@@ -37,7 +40,7 @@ export function useKeyboardPTT(
   const heldKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    if (!enabled || Platform.OS !== 'web' || typeof window === 'undefined') return;
 
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (!PTT_KEYS.has(event.code)) return;
@@ -73,5 +76,5 @@ export function useKeyboardPTT(
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', handleWindowBlur);
     };
-  }, []);
+  }, [enabled]);
 }

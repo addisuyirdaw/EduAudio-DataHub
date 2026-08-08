@@ -1,26 +1,39 @@
 /**
  * recognitionBridge.ts
  * ─────────────────────────────────────────────────────────────────────────────
- * Minimal pub/sub channel so TTS completion can request the speech recognizer
- * to start listening. Used by the AI Teacher push-to-talk flow: when an
- * onboarding/status prompt finishes speaking while the user is still holding
- * the surface, the recognizer re-arms itself instead of waiting for a fresh
- * press.
+ * Minimal pub/sub channel between TTS completion / FSM events and the speech
+ * recognizer.
+ *
+ * Used by the AI Teacher push-to-talk flow:
+ *  - 'ttsFinished': a prompt finished while the user is still holding the
+ *    push-to-talk surface, so the recognizer re-arms itself.
+ *  - 'autoListen':  the speak-then-listen accessibility loop wants the mic
+ *    re-armed hands-free (greeting finished, a page finished reading, or a
+ *    spoken navigation command was just answered).
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-type StartListener = () => void;
+export type RecognitionBridgeReason = 'ttsFinished' | 'autoListen';
 
-const listeners = new Set<StartListener>();
+type BridgeListener = (reason: RecognitionBridgeReason) => void;
+
+const listeners = new Set<BridgeListener>();
+
+function emit(reason: RecognitionBridgeReason): void {
+  listeners.forEach((listener) => listener(reason));
+}
 
 export const recognitionBridge = {
-  subscribe(listener: StartListener): () => void {
+  subscribe(listener: BridgeListener): () => void {
     listeners.add(listener);
     return () => {
       listeners.delete(listener);
     };
   },
   notifyTtsFinished(): void {
-    listeners.forEach((listener) => listener());
+    emit('ttsFinished');
+  },
+  notifyAutoListen(): void {
+    emit('autoListen');
   },
 };

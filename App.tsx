@@ -20,6 +20,8 @@ import { SafeAreaView, StyleSheet, View, Text, Pressable } from 'react-native';
 import { Audio } from 'expo-av';
 import { EducationalAudioPlayer } from './src/components/EducationalAudioPlayer';
 import { AITeacherScreen } from './src/components/AITeacherScreen';
+import { useKeyboardPTT } from './src/hooks/useKeyboardPTT';
+import { audioMutex } from './src/context/AudioMutex';
 import { Colors, Typography, Spacing, Radius } from './src/styles/theme';
 
 type Mode = 'player' | 'teacher';
@@ -48,11 +50,38 @@ export default function App() {
     configureAudio();
   }, []);
 
+  /**
+   * Audio isolation on tab switch: stop any in-flight TTS / mutex-tracked
+   * playback before the screen swap, so the AI Teacher's spoken greeting never
+   * bleeds into the player and vice-versa. The Audio Player's own sound is
+   * stopped by its unmount cleanup.
+   */
+  const switchMode = async (nextMode: Mode): Promise<void> => {
+    await audioMutex.hardPause();
+    setMode(nextMode);
+  };
+
+  /**
+   * Spacebar / M on the AUDIO PLAYER tab: stop playback immediately and hand
+   * the speech input to the AI Teacher (which mounts, greets, and opens the
+   * hands-free listening loop).
+   */
+  useKeyboardPTT(
+    () => {
+      void (async () => {
+        await audioMutex.hardPause();
+        setMode('teacher');
+      })();
+    },
+    () => {},
+    mode === 'player'
+  );
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.modeSwitcher}>
         <Pressable
-          onPress={() => setMode('player')}
+          onPress={() => switchMode('player')}
           accessible={true}
           accessibilityRole="button"
           accessibilityLabel="Switch to audio player mode"
@@ -73,7 +102,7 @@ export default function App() {
         </Pressable>
 
         <Pressable
-          onPress={() => setMode('teacher')}
+          onPress={() => switchMode('teacher')}
           accessible={true}
           accessibilityRole="button"
           accessibilityLabel="Switch to AI teacher mode"

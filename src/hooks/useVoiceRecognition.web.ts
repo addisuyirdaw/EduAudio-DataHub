@@ -31,10 +31,18 @@ export interface UseVoiceRecognitionReturn {
   isRecognizing: boolean;
   error: string | null;
 
-  startListening: () => Promise<void>;
+  startListening: (options?: StartListeningOptions) => Promise<void>;
   stopListening: () => Promise<string>;
   destroy: () => void;
   resetRecognizedText: () => void;
+}
+
+/**
+ * Options for a single listening session. `onFinalResult` lets the auto-listen
+ * loop (hands-free) process a recognized command without a push-to-talk press.
+ */
+export interface StartListeningOptions {
+  onFinalResult?: (text: string) => void;
 }
 
 /**
@@ -79,15 +87,18 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const keepAliveRef = useRef(false);
   const stopRequestedRef = useRef(false);
   const latestResultRef = useRef('');
+  const finalResultRef = useRef<((text: string) => void) | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const startListening = useCallback(async () => {
+  const startListening = useCallback(async (options?: StartListeningOptions) => {
     const recognition = recognitionRef.current;
     if (!recognition) {
       setError('Speech recognition is not supported in this browser.');
       return;
     }
     if (activeRef.current) return;
+
+    finalResultRef.current = options?.onFinalResult ?? null;
 
     try {
       setError(null);
@@ -108,6 +119,21 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setError(startError instanceof Error ? startError.message : 'Failed to start listening');
       console.error('[VoiceRecognition.web] Start listening error:', startError);
     }
+  }, []);
+
+  /**
+   * Some errors (missing mic permission, unsupported language) can never
+   * succeed by retrying. Bailing out keeps the auto-listen loop from
+   * hammering the recognizer forever when a browser blocks the mic.
+   */
+  const isFatalError = useCallback((error: string): boolean => {
+    return (
+      error === 'not-allowed' ||
+      error === 'service-not-allowed' ||
+      error === 'not-supported' ||
+      error === 'audio-capture' ||
+      error === 'bad-grammar'
+    );
   }, []);
 
   const scheduleRestart = useCallback(() => {
@@ -169,6 +195,11 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
         setRecognizedText(transcript);
         // Blind accessibility: expose the live transcript immediately.
         console.log('STT Captured:', transcript);
+        if (isFinal) {
+          // Hands-free auto-listen loop: hand the recognized command straight
+          // to the teacher engine without requiring a push-to-talk release.
+          finalResultRef.current?.(transcript);
+        }
       }
     };
 
@@ -176,9 +207,15 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setIsListening(false);
       setIsRecognizing(false);
       activeRef.current = false;
-      setError(String(event?.error ?? 'Speech recognition error'));
+      const errorCode = String(event?.error ?? 'unknown');
+      setError(errorCode);
       console.error('[VoiceRecognition.web] Speech recognition error:', event);
-      scheduleRestart();
+      if (isFatalError(errorCode)) {
+        keepAliveRef.current = false;
+        stopRequestedRef.current = true;
+      } else {
+        scheduleRestart();
+      }
     };
 
     recognition.onend = () => {
@@ -223,6 +260,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     const recognition = recognitionRef.current;
     keepAliveRef.current = false;
     stopRequestedRef.current = true;
+    finalResultRef.current = null;
 
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);

@@ -59,16 +59,41 @@ export function useAITeacher(): UseAITeacherReturn {
   
   const [statusMessage, setStatusMessage] = useState('Ready to study');
   const isHoldingRef = useRef(false);
+  const autoListenRef = useRef(false);
 
-  // When a status/onboarding prompt finishes while the user is still holding
-  // the push-to-talk surface, re-arm the microphone so speech is captured.
+  /**
+   * Hands-free capture: a recognized final transcript arrives straight from
+   * the recognizer (no push-to-talk press), gets routed through the same FSM
+   * pipeline as a spoken PTT command, and the loop re-arms on the response.
+   */
+  const handleAutoCapture = useCallback(async (text: string) => {
+    if (!autoListenRef.current) return;
+    autoListenRef.current = false;
+    try {
+      const captured = text || (await voiceRecognition.stopListening());
+      await context.handleTouchUp(captured || '');
+    } catch (error) {
+      console.error('[useAITeacher] Auto capture error:', error);
+    }
+  }, [context, voiceRecognition]);
+
+  // Speak-then-listen accessibility loop:
+  //  - 'autoListen': greeting / page reading / command response finished ->
+  //    re-arm the mic hands-free.
+  //  - 'ttsFinished': a prompt finished while the user is still holding the
+  //    push-to-talk surface -> re-arm the mic for the held press.
   useEffect(() => {
-    return recognitionBridge.subscribe(() => {
-      if (isHoldingRef.current) {
-        void voiceRecognition.startListening();
+    return recognitionBridge.subscribe((reason) => {
+      if (reason === 'autoListen') {
+        autoListenRef.current = true;
+        void voiceRecognition.startListening({ onFinalResult: handleAutoCapture });
+      } else if (reason === 'ttsFinished') {
+        if (isHoldingRef.current) {
+          void voiceRecognition.startListening();
+        }
       }
     });
-  }, [voiceRecognition]);
+  }, [voiceRecognition, handleAutoCapture]);
 
   // Sync status messages with FSM state
   useEffect(() => {
