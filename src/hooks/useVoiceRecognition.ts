@@ -19,7 +19,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Voice from '@react-native-voice/voice';
+import * as Speech from 'expo-speech';
 import { recognitionBridge } from '../services/recognitionBridge';
+import { playChime } from '../services/audioChime';
 
 export interface UseVoiceRecognitionReturn {
   isListening: boolean;
@@ -97,6 +99,13 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     setIsRecognizing(true);
     setError(null);
     console.log('[VoiceRecognition] Speech recognition started');
+    // Mic is live: silence any TTS output so the mic is never blocked.
+    try {
+      Speech.stop();
+    } catch {
+      // ignore
+    }
+    playChime('start');
   };
 
   const onSpeechRecognized = () => {
@@ -205,6 +214,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     const text = latestResultRef.current;
     setRecognizedText(text);
     console.log(`[VoiceRecognition] Stopped listening (result: "${text || '<empty>'}")`);
+    playChime('end');
     return text;
   }, []);
 

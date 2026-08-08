@@ -9,14 +9,15 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import React from 'react';
-import { View, Text, StyleSheet, Pressable, StatusBar } from 'react-native';
-import { TeacherProvider, useTeacherContext } from '../context/TeacherContext';
+import React, { useState } from 'react';
+import { View, Text, StyleSheet, Pressable, StatusBar, TextInput } from 'react-native';
+import { TeacherProvider } from '../context/TeacherContext';
 import { useAITeacher } from '../hooks/useAITeacher';
+import { useKeyboardPTT } from '../hooks/useKeyboardPTT';
 import { ActiveParagraphDisplay } from './ActiveParagraphDisplay';
 import { StatusIndicator } from './StatusIndicator';
 import { FullScreenPTT } from './FullScreenPTT';
-import { Colors } from '../styles/theme';
+import { Colors, Spacing, Typography } from '../styles/theme';
 
 /**
  * Inner component that uses the teacher context
@@ -25,10 +26,25 @@ const AITeacherContent: React.FC = () => {
   const {
     state,
     statusMessage,
+    recognizedText,
     handleTouchDown,
     handleTouchUp,
+    submitTextCommand,
     getAccessibilityLabel,
   } = useAITeacher();
+
+  const [typedCommand, setTypedCommand] = useState('');
+
+  // Global Spacebar / M hotkey -> Push-To-Talk (web builds) for keyboard and
+  // screen-reader users who cannot use mouse/touch.
+  useKeyboardPTT(handleTouchDown, handleTouchUp);
+
+  const handleSubmitCommand = () => {
+    const command = typedCommand.trim();
+    if (!command) return;
+    setTypedCommand('');
+    void submitTextCommand(command);
+  };
 
   return (
     <View style={styles.container}>
@@ -39,6 +55,21 @@ const AITeacherContent: React.FC = () => {
       
       {/* Active Paragraph Display */}
       <ActiveParagraphDisplay />
+      
+      {/* Fallback text command input (speech-recognition-restricted browsers) */}
+      <View style={styles.commandInputContainer}>
+        <TextInput
+          style={styles.commandInput}
+          value={typedCommand}
+          onChangeText={setTypedCommand}
+          onSubmitEditing={handleSubmitCommand}
+          placeholder="Type a command (e.g. next, explain arrays)..."
+          placeholderTextColor={Colors.muted}
+          returnKeyType="send"
+          accessibilityLabel="Command input"
+          accessibilityHint="Type a voice command like next or a question, then press enter"
+        />
+      </View>
       
       {/* Full-Screen Push-to-Talk Overlay with integrated touch handlers */}
       <FullScreenPTT 
@@ -54,7 +85,10 @@ const AITeacherContent: React.FC = () => {
         importantForAccessibility="yes"
         style={styles.liveRegion}
       >
-        <Text style={styles.liveRegionText}>{statusMessage}</Text>
+        <Text style={styles.liveRegionText}>
+          {statusMessage}
+          {recognizedText ? ` — Captured: ${recognizedText}` : ''}
+        </Text>
       </View>
     </View>
   );
@@ -75,6 +109,23 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: Colors.background,
+  },
+  commandInputContainer: {
+    paddingHorizontal: Spacing.lg,
+    paddingBottom: Spacing.md,
+    // Keep the input above the full-bleed PTT overlay so it stays tappable.
+    zIndex: 10,
+    elevation: 10,
+  },
+  commandInput: {
+    backgroundColor: Colors.surface,
+    color: Colors.onSurface,
+    borderColor: Colors.primary,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    fontSize: Typography.size.md,
   },
   liveRegion: {
     position: 'absolute',

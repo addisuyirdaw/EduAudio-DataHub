@@ -40,6 +40,7 @@ export interface UseAITeacherReturn {
   cancelListening: () => Promise<void>;
   handleTouchDown: () => Promise<void>;
   handleTouchUp: () => Promise<void>;
+  submitTextCommand: (text: string) => Promise<void>;
   startOnboarding: () => Promise<void>;
 
   // Utilities
@@ -150,6 +151,7 @@ export function useAITeacher(): UseAITeacherReturn {
     cancelListening: context.cancelListening,
     handleTouchDown,
     handleTouchUp,
+    submitTextCommand: context.submitTextCommand,
     startOnboarding: context.startOnboarding,
 
     parseVoiceCommand: (command: string) => null, // Simplified for now

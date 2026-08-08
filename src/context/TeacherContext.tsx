@@ -372,123 +372,152 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   }, [state, transitionState, startOnboarding]);
 
   /**
+   * Process a typed or recognized text command (non-onboarding routing).
+   * Shared by the voice LISTENING path and the fallback text input.
+   */
+  const processCommandText = useCallback(async (text: string): Promise<void> => {
+    const { action, offlineMessage } = await voiceCommandParser.processCommand(text);
+
+    if (offlineMessage) {
+      await speakSilently(offlineMessage, { onDone: () => { transitionState('PAUSED'); } });
+      return;
+    }
+
+    // Route commands
+    if (action.type === 'AI_QUERY') {
+      await askQuestion(text);
+      return;
+    }
+
+    const doc = documentRef.current;
+    const page = currentPage;
+
+    switch (action.type) {
+      case 'RESUME':
+        if (doc && page >= 1) {
+          await startReading({ startPage: page, endPage: doc.totalPages, type: 'pages' });
+        } else {
+          transitionState('PAUSED');
+        }
+        break;
+      case 'NEXT':
+        if (doc && page < doc.totalPages) {
+          setCurrentPage(page + 1);
+          await speakSilently(doc.pages[page]?.text ?? 'You have reached the end of the document.');
+        } else {
+          await speakSilently('You are already at the end of the document.');
+        }
+        transitionState('PAUSED');
+        break;
+      case 'BACK':
+        if (doc && page > 1) {
+          setCurrentPage(page - 1);
+          await speakSilently(doc.pages[page - 2]?.text ?? 'This is the start of the document.');
+        } else {
+          await speakSilently('You are already at the start of the document.');
+        }
+        transitionState('PAUSED');
+        break;
+      case 'REPEAT':
+        if (doc && page >= 1 && doc.pages[page - 1]?.text) {
+          await speakSilently(doc.pages[page - 1].text as string);
+        } else {
+          await speakSilently("There is no content to repeat yet.");
+        }
+        transitionState('PAUSED');
+        break;
+      case 'PAUSE':
+      case 'STOP':
+      default:
+        transitionState('PAUSED');
+        break;
+    }
+  }, [currentPage, transitionState, speakSilently, askQuestion, startReading]);
+
+  /**
+   * Process onboarding input (Subject -> Unit -> Topic).
+   */
+  const processOnboardingText = useCallback(async (text: string): Promise<void> => {
+    if (!text.trim()) {
+      await speakSilently("I didn't catch that. Please try again.", {
+        onDone: () => { transitionState('ONBOARDING'); },
+      });
+      return;
+    }
+
+    if (onboardingStep === 1) {
+      setOnboardingStep(2);
+      await speakSilently(`Got it! Studying ${text} today. Which unit or chapter are we working on?`);
+    } else if (onboardingStep === 2) {
+      setOnboardingStep(3);
+      await speakSilently(`Okay, chapter ${text}. Which specific topic should we cover?`);
+    } else if (onboardingStep === 3) {
+      setOnboardingStep(0);
+      transitionState('THINKING');
+      await speakSilently("One moment while I fetch the lesson metadata and verify the content.");
+
+      // Fetch Metadata & Verify
+      const topicId = text.toLowerCase().replace(/\s+/g, '-');
+      let docMetadata: EducationalMetadata | null = null;
+      try {
+        docMetadata = await dataHubService.fetchMetadata(topicId);
+      } catch (e) {
+        console.warn("Metadata verification failed, using offline outline.", e);
+      }
+      setMetadata(docMetadata);
+
+      const lessonDoc = buildLessonDocument(topicId, text, docMetadata);
+      documentRef.current = lessonDoc;
+      setDocument(lessonDoc);
+      setCurrentPage(1);
+      transitionState('AI_SPEAKING');
+      await speakSilently(`Verified. I've loaded the outline for ${lessonDoc.title}. Starting lesson now.`);
+      await startReading({ startPage: 1, endPage: lessonDoc.totalPages, type: 'pages' });
+    }
+  }, [onboardingStep, transitionState, speakSilently, startReading]);
+
+  /**
    * Handle touch up - Main voice logic
    */
   const handleTouchUp = useCallback(async (recognizedText: string): Promise<void> => {
     if (state === 'ONBOARDING') {
       await audioMutex.releaseRecordingLock();
-
-      if (!recognizedText.trim()) {
-        await speakSilently("I didn't catch that. Please try again.", {
-          onDone: () => {
-            transitionState('ONBOARDING');
-          },
-        });
-        return;
-      }
-
-      if (onboardingStep === 1) {
-        setOnboardingStep(2);
-        await speakSilently(`Got it! Studying ${recognizedText} today. Which unit or chapter are we working on?`);
-      } else if (onboardingStep === 2) {
-        setOnboardingStep(3);
-        await speakSilently(`Okay, chapter ${recognizedText}. Which specific topic should we cover?`);
-      } else if (onboardingStep === 3) {
-        setOnboardingStep(0);
-        transitionState('THINKING');
-        await speakSilently("One moment while I fetch the lesson metadata and verify the content.");
-
-        // Fetch Metadata & Verify
-        const topicId = recognizedText.toLowerCase().replace(/\s+/g, '-');
-        let docMetadata: EducationalMetadata | null = null;
-        try {
-          docMetadata = await dataHubService.fetchMetadata(topicId);
-        } catch (e) {
-          console.warn("Metadata verification failed, using offline outline.", e);
-        }
-        setMetadata(docMetadata);
-
-        const lessonDoc = buildLessonDocument(topicId, recognizedText, docMetadata);
-        documentRef.current = lessonDoc;
-        setDocument(lessonDoc);
-        setCurrentPage(1);
-        transitionState('AI_SPEAKING');
-        await speakSilently(`Verified. I've loaded the outline for ${lessonDoc.title}. Starting lesson now.`);
-        await startReading({ startPage: 1, endPage: lessonDoc.totalPages, type: 'pages' });
-      }
+      await processOnboardingText(recognizedText);
       return;
     }
 
     if (state === 'LISTENING') {
       await audioMutex.releaseRecordingLock();
-
       if (!recognizedText.trim()) {
         await speakSilently("I didn't catch that. Please try again.", {
-          onDone: () => {
-            transitionState('PAUSED');
-          },
+          onDone: () => { transitionState('PAUSED'); },
         });
         return;
       }
-
-      const { action, offlineMessage } = await voiceCommandParser.processCommand(recognizedText);
-
-      if (offlineMessage) {
-        await speakSilently(offlineMessage, { onDone: () => { transitionState('PAUSED'); } });
-        return;
-      }
-
-      // Route commands
-      if (action.type === 'AI_QUERY') {
-        await askQuestion(recognizedText);
-        return;
-      }
-
-      const doc = documentRef.current;
-      const page = currentPage;
-
-      switch (action.type) {
-        case 'RESUME':
-          if (doc && page >= 1) {
-            await startReading({ startPage: page, endPage: doc.totalPages, type: 'pages' });
-          } else {
-            transitionState('PAUSED');
-          }
-          break;
-        case 'NEXT':
-          if (doc && page < doc.totalPages) {
-            setCurrentPage(page + 1);
-            await speakSilently(doc.pages[page]?.text ?? 'You have reached the end of the document.');
-          } else {
-            await speakSilently('You are already at the end of the document.');
-          }
-          transitionState('PAUSED');
-          break;
-        case 'BACK':
-          if (doc && page > 1) {
-            setCurrentPage(page - 1);
-            await speakSilently(doc.pages[page - 2]?.text ?? 'This is the start of the document.');
-          } else {
-            await speakSilently('You are already at the start of the document.');
-          }
-          transitionState('PAUSED');
-          break;
-        case 'REPEAT':
-          if (doc && page >= 1 && doc.pages[page - 1]?.text) {
-            await speakSilently(doc.pages[page - 1].text as string);
-          } else {
-            await speakSilently("There is no content to repeat yet.");
-          }
-          transitionState('PAUSED');
-          break;
-        case 'PAUSE':
-        case 'STOP':
-        default:
-          transitionState('PAUSED');
-          break;
-      }
+      await processCommandText(recognizedText);
     }
-  }, [state, onboardingStep, currentPage, transitionState, speakSilently, askQuestion, startReading]);
+  }, [state, transitionState, speakSilently, processOnboardingText, processCommandText]);
+
+  /**
+   * Fallback text command entry point (debug / speech-recognition-restricted
+   * browsers). Types straight into the same routing pipeline as voice input.
+   */
+  const submitTextCommand = useCallback(async (text: string): Promise<void> => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    stopReadingRef.current = true;
+    await audioMutex.hardPause();
+    await audioMutex.releaseRecordingLock();
+
+    if (state === 'ONBOARDING') {
+      await processOnboardingText(trimmed);
+      return;
+    }
+
+    transitionState('LISTENING');
+    await processCommandText(trimmed);
+  }, [state, transitionState, processOnboardingText, processCommandText]);
 
   const contextValue: TeacherContext = {
     state,
@@ -510,6 +539,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     clearError,
     handleTouchDown,
     handleTouchUp,
+    submitTextCommand,
     startOnboarding,
   };
 

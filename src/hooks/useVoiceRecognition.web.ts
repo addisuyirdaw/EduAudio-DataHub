@@ -21,7 +21,9 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import * as Speech from 'expo-speech';
 import { recognitionBridge } from '../services/recognitionBridge';
+import { playChime } from '../services/audioChime';
 
 export interface UseVoiceRecognitionReturn {
   isListening: boolean;
@@ -133,7 +135,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     }
 
     recognitionRef.current = recognition;
-    recognition.continuous = false;
+    recognition.continuous = true;
     recognition.interimResults = true;
     recognition.maxAlternatives = 3;
     recognition.lang = 'en-US';
@@ -142,6 +144,14 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setIsRecognizing(true);
       setError(null);
       console.log('[VoiceRecognition.web] Speech recognition started');
+      // Mic is live: immediately silence any TTS output so the mic is never
+      // blocked by audio the AI is currently reading aloud.
+      try {
+        Speech.stop();
+      } catch {
+        // ignore
+      }
+      playChime('start');
     };
 
     recognition.onresult = (event: any) => {
@@ -157,7 +167,8 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       if (transcript) {
         latestResultRef.current = transcript;
         setRecognizedText(transcript);
-        if (isFinal) console.log('[VoiceRecognition.web] Final result:', transcript);
+        // Blind accessibility: expose the live transcript immediately.
+        console.log('STT Captured:', transcript);
       }
     };
 
@@ -238,6 +249,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     activeRef.current = false;
     setRecognizedText(text);
     console.log(`[VoiceRecognition.web] Stopped listening (result: "${text || '<empty>'}")`);
+    playChime('end');
     return text;
   }, []);
 

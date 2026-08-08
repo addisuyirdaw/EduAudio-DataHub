@@ -171,6 +171,7 @@ export interface TeacherContext {
   clearError: () => void;
   handleTouchDown: () => Promise<boolean>;
   handleTouchUp: (recognizedText: string) => Promise<void>;
+  submitTextCommand: (text: string) => Promise<void>;
   startOnboarding: () => Promise<void>;
 }
 
