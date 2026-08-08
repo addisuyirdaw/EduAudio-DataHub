@@ -118,7 +118,9 @@ class AudioMutex {
     // Stop TTS
     if (this.state.isTTSActive) {
       try {
-        // TTS stop logic would go here
+        // Import Speech dynamically to avoid circular dependency
+        const Speech = require('expo-speech').default;
+        await Speech.stop();
         this.state.isTTSActive = false;
         console.log('[AudioMutex] TTS stopped');
       } catch (error) {

@@ -13,6 +13,7 @@ import { useTeacherContext } from '../context/TeacherContext';
 import { useVoiceRecognition } from './useVoiceRecognition';
 import { useTextToSpeech } from './useTextToSpeech';
 import { dataHubService } from '../services/DataHubService';
+import { recognitionBridge } from '../services/recognitionBridge';
 import type { PageRange, TeacherState } from '../types/teacher.types';
 
 export interface UseAITeacherReturn {
@@ -56,6 +57,17 @@ export function useAITeacher(): UseAITeacherReturn {
   const textToSpeech = useTextToSpeech();
   
   const [statusMessage, setStatusMessage] = useState('Ready to study');
+  const isHoldingRef = useRef(false);
+
+  // When a status/onboarding prompt finishes while the user is still holding
+  // the push-to-talk surface, re-arm the microphone so speech is captured.
+  useEffect(() => {
+    return recognitionBridge.subscribe(() => {
+      if (isHoldingRef.current) {
+        void voiceRecognition.startListening();
+      }
+    });
+  }, [voiceRecognition]);
 
   // Sync status messages with FSM state
   useEffect(() => {
@@ -89,9 +101,11 @@ export function useAITeacher(): UseAITeacherReturn {
    */
   const handleTouchDown = useCallback(async () => {
     try {
-      await context.handleTouchDown();
-      // Only start recognition if we are not in a speaking-only transition
-      if (context.state !== 'THINKING' && context.state !== 'PARSING_DOC') {
+      isHoldingRef.current = true;
+      const shouldListen = await context.handleTouchDown();
+      if (shouldListen) {
+        // Let hardPause finish stopping TTS before the mic opens (audio focus).
+        await new Promise((resolve) => setTimeout(resolve, 150));
         await voiceRecognition.startListening();
       }
     } catch (error) {
@@ -104,9 +118,9 @@ export function useAITeacher(): UseAITeacherReturn {
    */
   const handleTouchUp = useCallback(async () => {
     try {
-      await voiceRecognition.stopListening();
-      const text = voiceRecognition.recognizedText;
-      
+      isHoldingRef.current = false;
+      const text = await voiceRecognition.stopListening();
+
       // Pass the text to context for FSM processing (onboarding or commands)
       await context.handleTouchUp(text || '');
     } catch (error) {

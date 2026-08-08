@@ -2,27 +2,38 @@
  * useVoiceRecognition.ts
  * ─────────────────────────────────────────────────────────────────────────────
  * Voice Recognition Hook
- * 
+ *
  * Manages speech-to-text functionality using @react-native-voice/voice.
  * Handles microphone activation, speech recognition, and error handling.
- * 
+ *
+ * Behavior guarantees relied on by the AI Teacher FSM:
+ * - `startListening` is idempotent (no-op while already listening).
+ * - While `keepAlive` is true the recognizer auto-restarts on end/error so a
+ *   held push-to-talk press survives transient recognition resets.
+ * - `stopListening` returns the latest recognized transcript (polled from the
+ *   async onSpeechResults event that arrives after stop()).
+ * - TTS completion can re-arm the mic via `recognitionBridge` (used while the
+ *   onboarding prompt is finishing under a still-held press).
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Voice from '@react-native-voice/voice';
+import { recognitionBridge } from '../services/recognitionBridge';
 
 export interface UseVoiceRecognitionReturn {
   isListening: boolean;
   recognizedText: string;
   isRecognizing: boolean;
   error: string | null;
-  
+
   startListening: () => Promise<void>;
-  stopListening: () => Promise<void>;
+  stopListening: () => Promise<string>;
   destroy: () => void;
   resetRecognizedText: () => void;
 }
+
+const RESTART_DELAY_MS = 200;
 
 /**
  * Hook for voice recognition functionality
@@ -33,22 +44,54 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const [isRecognizing, setIsRecognizing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const recognitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeRef = useRef(false);
+  const keepAliveRef = useRef(false);
+  const stopRequestedRef = useRef(false);
+  const latestResultRef = useRef('');
+  const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Setup voice recognition on mount
-  useEffect(() => {
-    Voice.onSpeechStart = onSpeechStart;
-    Voice.onSpeechRecognized = onSpeechRecognized;
-    Voice.onSpeechEnd = onSpeechEnd;
-    Voice.onSpeechError = onSpeechError;
-    Voice.onSpeechResults = onSpeechResults;
-    Voice.onSpeechPartialResults = onSpeechPartialResults;
-    Voice.onSpeechVolumeChanged = onSpeechVolumeChanged;
+  const startListening = useCallback(async () => {
+    if (activeRef.current) return;
 
-    return () => {
-      Voice.destroy().then(Voice.removeAllListeners);
-    };
+    try {
+      setError(null);
+      setRecognizedText('');
+      latestResultRef.current = '';
+      stopRequestedRef.current = false;
+      keepAliveRef.current = true;
+      activeRef.current = true;
+      setIsListening(true);
+
+      await Voice.start('en-US', {
+        EXTRA_PARTIAL_RESULTS: true,
+        EXTRA_MAX_ALTERNATIVES: 3,
+        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 1000,
+        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 2000,
+        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 1500,
+      });
+
+      console.log('[VoiceRecognition] Started listening');
+    } catch (error) {
+      activeRef.current = false;
+      setIsListening(false);
+      setError(error instanceof Error ? error.message : 'Failed to start listening');
+      console.error('[VoiceRecognition] Start listening error:', error);
+    }
   }, []);
+
+  const scheduleRestart = useCallback(() => {
+    if (restartTimerRef.current) {
+      clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+    restartTimerRef.current = setTimeout(() => {
+      restartTimerRef.current = null;
+      if (keepAliveRef.current && !stopRequestedRef.current) {
+        console.log('[VoiceRecognition] Auto-restarting recognition after end/error');
+        void startListening();
+      }
+    }, RESTART_DELAY_MS);
+  }, [startListening]);
 
   const onSpeechStart = () => {
     setIsRecognizing(true);
@@ -64,19 +107,24 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const onSpeechEnd = () => {
     setIsListening(false);
     setIsRecognizing(false);
+    activeRef.current = false;
     console.log('[VoiceRecognition] Speech recognition ended');
+    scheduleRestart();
   };
 
   const onSpeechError = (e: any) => {
     setIsListening(false);
     setIsRecognizing(false);
+    activeRef.current = false;
     setError(JSON.stringify(e.error));
     console.error('[VoiceRecognition] Speech recognition error:', e);
+    scheduleRestart();
   };
 
   const onSpeechResults = (e: any) => {
     if (e.value && e.value.length > 0) {
       const text = e.value[0];
+      latestResultRef.current = text;
       setRecognizedText(text);
       console.log('[VoiceRecognition] Speech result:', text);
     }
@@ -93,50 +141,84 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     // console.log('[VoiceRecognition] Volume changed:', e.value);
   };
 
-  /**
-   * Start listening for speech
-   */
-  const startListening = useCallback(async () => {
-    try {
-      setError(null);
-      setRecognizedText('');
-      setIsListening(true);
+  // Setup voice recognition on mount
+  useEffect(() => {
+    Voice.onSpeechStart = onSpeechStart;
+    Voice.onSpeechRecognized = onSpeechRecognized;
+    Voice.onSpeechEnd = onSpeechEnd;
+    Voice.onSpeechError = onSpeechError;
+    Voice.onSpeechResults = onSpeechResults;
+    Voice.onSpeechPartialResults = onSpeechPartialResults;
+    Voice.onSpeechVolumeChanged = onSpeechVolumeChanged;
 
-      await Voice.start('en-US', {
-        EXTRA_PARTIAL_RESULTS: true,
-        EXTRA_MAX_ALTERNATIVES: 3,
-        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 1000,
-        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 2000,
-        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 1500,
-      });
-
-      console.log('[VoiceRecognition] Started listening');
-    } catch (error) {
-      setIsListening(false);
-      setError(error instanceof Error ? error.message : 'Failed to start listening');
-      console.error('[VoiceRecognition] Start listening error:', error);
-    }
+    return () => {
+      keepAliveRef.current = false;
+      stopRequestedRef.current = true;
+      if (restartTimerRef.current) {
+        clearTimeout(restartTimerRef.current);
+        restartTimerRef.current = null;
+      }
+      Voice.destroy().then(Voice.removeAllListeners);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Re-arm the mic when TTS finishes while the user is still holding.
+  useEffect(() => {
+    return recognitionBridge.subscribe(() => {
+      if (keepAliveRef.current && !stopRequestedRef.current) {
+        void startListening();
+      }
+    });
+  }, [startListening]);
+
   /**
-   * Stop listening for speech
+   * Stop listening for speech and return the latest recognized transcript.
+   * Pauses briefly so the async onSpeechResults event can land before we
+   * resolve, keeping the "stop then read recognizedText" flow in sync.
    */
-  const stopListening = useCallback(async () => {
+  const stopListening = useCallback(async (): Promise<string> => {
+    keepAliveRef.current = false;
+    stopRequestedRef.current = true;
+
+    if (restartTimerRef.current) {
+      clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+
     try {
       await Voice.stop();
-      setIsListening(false);
-      setIsRecognizing(false);
-      console.log('[VoiceRecognition] Stopped listening');
     } catch (error) {
-      setError(error instanceof Error ? error.message : 'Failed to stop listening');
-      console.error('[VoiceRecognition] Stop listening error:', error);
+      console.warn('[VoiceRecognition] Stop listening error:', error);
     }
+
+    setIsListening(false);
+    setIsRecognizing(false);
+    activeRef.current = false;
+
+    // The final onSpeechResults event is delivered asynchronously after stop().
+    const deadline = Date.now() + 1500;
+    while (!latestResultRef.current && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    const text = latestResultRef.current;
+    setRecognizedText(text);
+    console.log(`[VoiceRecognition] Stopped listening (result: "${text || '<empty>'}")`);
+    return text;
   }, []);
 
   /**
    * Destroy voice recognition instance
    */
   const destroy = useCallback(() => {
+    keepAliveRef.current = false;
+    stopRequestedRef.current = true;
+    if (restartTimerRef.current) {
+      clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+    activeRef.current = false;
     Voice.destroy().then(Voice.removeAllListeners);
     setIsListening(false);
     setIsRecognizing(false);
@@ -148,6 +230,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
    * Reset recognized text
    */
   const resetRecognizedText = useCallback(() => {
+    latestResultRef.current = '';
     setRecognizedText('');
   }, []);
 

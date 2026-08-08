@@ -16,10 +16,11 @@
 
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import * as Speech from 'expo-speech';
-import type { TeacherState, TeacherContext, ParsedDocument, PageRange, ConversationMessage, InterruptionContext, AudioMutexState } from '../types/teacher.types';
+import type { TeacherState, TeacherContext, ParsedDocument, ParsedPage, Heading, PageRange, ConversationMessage, InterruptionContext, AudioMutexState } from '../types/teacher.types';
 import { EducationalMetadata, dataHubService } from '../services/DataHubService';
 import { audioMutex } from './AudioMutex';
 import { voiceCommandParser, ParsedVoiceCommand } from '../services/voiceCommandParser.service';
+import { recognitionBridge } from '../services/recognitionBridge';
 
 interface TeacherContextProviderProps {
   children: React.ReactNode;
@@ -32,6 +33,55 @@ const TTS_CONFIG: Speech.SpeechOptions = {
   pitch: 1.0,
   rate: 0.9, // Slightly slower for better clarity
 };
+
+const DEFAULT_LESSON_TITLE = 'Computer Science 101 - Intro to Data Structures';
+const DEFAULT_LESSON_ID = 'cs101-intro-data-structures';
+
+/**
+ * Build a complete lesson document so the AI Teacher always has real content
+ * to render ("PAGE X OF Y" + page text) even before a real PDF is parsed.
+ * Uses verified DataHub metadata headings when available.
+ */
+function buildLessonDocument(topicId: string, title: string, metadata: EducationalMetadata | null): ParsedDocument {
+  const headings: Heading[] =
+    metadata?.headings && metadata.headings.length > 0
+      ? metadata.headings
+      : [
+          { level: 1, text: 'Introduction to Data Structures', position: 0 },
+          { level: 1, text: 'Arrays and Lists', position: 1 },
+          { level: 2, text: 'Stacks and Queues', position: 2 },
+          { level: 2, text: 'Trees and Graphs', position: 3 },
+          { level: 1, text: 'Review and Practice', position: 4 },
+        ];
+
+  const pages: ParsedPage[] = headings.map((heading, index) => {
+    const text = buildPageText(title, heading.text, index + 1);
+    return {
+      pageNumber: index + 1,
+      text,
+      paragraphs: [text],
+      headings: [heading],
+      tables: [],
+      textPosition: [{ start: 0, end: text.length, text }],
+    };
+  });
+
+  return {
+    id: topicId,
+    title,
+    uri: '',
+    totalPages: pages.length,
+    pages,
+    metadata: {
+      subject: title,
+      keywords: headings.map((heading) => heading.text),
+    },
+  };
+}
+
+function buildPageText(title: string, heading: string, page: number): string {
+  return `${title}. ${heading}. This is page ${page} of the lesson. ${heading} is explained in an accessible, step by step format so you can follow along hands free. Ask me to repeat any section, or say "next" to continue.`;
+}
 
 /**
  * Teacher Context Provider
@@ -53,6 +103,20 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   // Refs for async operations
   const stateTransitionRef = useRef<TeacherState>('IDLE');
   const isTransitioningRef = useRef(false);
+  const documentRef = useRef<ParsedDocument | null>(null);
+  const stopReadingRef = useRef(false);
+
+  // Auto-load a default lesson document on mount so the AI Teacher always
+  // renders "PAGE 1 OF X" + real lesson text immediately, even before the
+  // user picks a topic.
+  useEffect(() => {
+    if (!documentRef.current) {
+      const lesson = buildLessonDocument(DEFAULT_LESSON_ID, DEFAULT_LESSON_TITLE, null);
+      documentRef.current = lesson;
+      setDocument(lesson);
+      setCurrentPage(1);
+    }
+  }, []);
 
   // Subscribe to audio mutex state changes
   useEffect(() => {
@@ -65,34 +129,58 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   }, []);
 
   /**
-   * Safe TTS execution wrapper
+   * Safe TTS execution wrapper.
+   * Resolves only when the utterance completes (onDone/onError/onStopped), so
+   * callers like the page-reading loop can await actual speech completion.
    */
   const speakSilently = useCallback(async (text: string, options?: Speech.SpeechOptions) => {
     try {
       await audioMutex.acquireTTSLock();
       console.log(`[TeacherContext] Speaking: ${text.substring(0, 50)}...`);
 
-      Speech.speak(text, {
-        ...TTS_CONFIG,
-        ...options,
-        onDone: () => {
-          void (async () => {
-            await audioMutex.releaseTTSLock();
-            options?.onDone?.();
-          })();
-        },
-        onError: (error) => {
-          void (async () => {
-            console.error('[TeacherContext] Speech error:', error);
-            await audioMutex.releaseTTSLock();
-            options?.onError?.(error);
-          })();
-        },
-        onStopped: () => {
-          void (async () => {
-            await audioMutex.releaseTTSLock();
-          })();
-        }
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const settle = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(safety);
+          resolve();
+        };
+
+        // Safety net in case the platform never fires onDone/onStopped.
+        const safety = setTimeout(() => {
+          console.warn('[TeacherContext] TTS completion timeout, continuing.');
+          void audioMutex.releaseTTSLock();
+          settle();
+        }, 60000);
+
+        Speech.speak(text, {
+          ...TTS_CONFIG,
+          ...options,
+          onDone: () => {
+            settle();
+            void (async () => {
+              await audioMutex.releaseTTSLock();
+              // Tell the recognizer it can re-arm the mic (still-held press).
+              recognitionBridge.notifyTtsFinished();
+              options?.onDone?.();
+            })();
+          },
+          onError: (error) => {
+            settle();
+            void (async () => {
+              console.error('[TeacherContext] Speech error:', error);
+              await audioMutex.releaseTTSLock();
+              options?.onError?.(error);
+            })();
+          },
+          onStopped: () => {
+            settle();
+            void (async () => {
+              await audioMutex.releaseTTSLock();
+            })();
+          }
+        });
       });
     } catch (err) {
       console.error('[TeacherContext] TTS speak failed:', err);
@@ -140,16 +228,10 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     }
 
     try {
-      // Simulation of PDF parsing
-      const mockDocument: ParsedDocument = {
-        id: `doc_${Date.now()}`,
-        title: 'Quantum Mechanics 101',
-        uri,
-        totalPages: 22,
-        pages: [], // Actual content would be populated here
-        metadata: {},
-      };
-
+      // Simulation of PDF parsing - build a real lesson document
+      const mockDocument = buildLessonDocument(`doc_${Date.now()}`, 'Quantum Mechanics 101', null);
+      mockDocument.uri = uri;
+      documentRef.current = mockDocument;
       setDocument(mockDocument);
 
       // Fetch Educational Metadata
@@ -175,9 +257,34 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
    */
   const startReading = useCallback(async (range: PageRange): Promise<void> => {
     transitionState('AI_SPEAKING');
-    setCurrentPage(range.startPage);
-    // Actual TTS implementation would loop through paragraphs here
-  }, [transitionState]);
+    const doc = documentRef.current;
+    if (!doc) {
+      await speakSilently("No document is loaded yet. Please choose a topic first.");
+      transitionState('PAUSED');
+      return;
+    }
+
+    stopReadingRef.current = false;
+    const endPage = Math.min(range.endPage, doc.totalPages);
+    let interrupted = false;
+    for (let page = range.startPage; page <= endPage; page++) {
+      const pageText = doc.pages[page - 1]?.text;
+      if (!pageText) break;
+      setCurrentPage(page);
+      await speakSilently(pageText);
+      if (stopReadingRef.current) {
+        stopReadingRef.current = false;
+        interrupted = true;
+        break;
+      }
+    }
+
+    // Only fall back to PAUSED on natural completion; an interruption already
+    // moved the FSM to LISTENING (the fromState guard makes this safe).
+    if (!interrupted) {
+      transitionState('PAUSED', 'AI_SPEAKING');
+    }
+  }, [transitionState, speakSilently]);
 
   const pauseReading = useCallback(async (): Promise<void> => {
     transitionState('PAUSED', 'AI_SPEAKING');
@@ -186,9 +293,13 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   }, [transitionState]);
 
   const resumeReading = useCallback(async (): Promise<void> => {
-    transitionState('AI_SPEAKING', 'PAUSED');
-    // Actual TTS implementation would resume here
-  }, [transitionState]);
+    const doc = documentRef.current;
+    if (!doc) {
+      transitionState('PAUSED', 'AI_SPEAKING');
+      return;
+    }
+    await startReading({ startPage: Math.max(currentPage, 1), endPage: doc.totalPages, type: 'pages' });
+  }, [currentPage, startReading]);
 
   const activateListening = useCallback(async (): Promise<void> => {
     transitionState('LISTENING');
@@ -243,16 +354,21 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
 
   /**
    * Handle touch down
+   * Returns true when voice recognition should start immediately (the
+   * onboarding prompt is not speaking). During IDLE the prompt speaks and the
+   * recognitionBridge re-arms the mic when it finishes.
    */
-  const handleTouchDown = useCallback(async (): Promise<void> => {
+  const handleTouchDown = useCallback(async (): Promise<boolean> => {
     if (state === 'IDLE') {
       await startOnboarding();
-      return;
+      return false;
     }
 
+    stopReadingRef.current = true;
     await audioMutex.hardPause();
     transitionState('LISTENING');
     await audioMutex.acquireRecordingLock();
+    return true;
   }, [state, transitionState, startOnboarding]);
 
   /**
@@ -261,6 +377,15 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   const handleTouchUp = useCallback(async (recognizedText: string): Promise<void> => {
     if (state === 'ONBOARDING') {
       await audioMutex.releaseRecordingLock();
+
+      if (!recognizedText.trim()) {
+        await speakSilently("I didn't catch that. Please try again.", {
+          onDone: () => {
+            transitionState('ONBOARDING');
+          },
+        });
+        return;
+      }
 
       if (onboardingStep === 1) {
         setOnboardingStep(2);
@@ -274,28 +399,38 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
         await speakSilently("One moment while I fetch the lesson metadata and verify the content.");
 
         // Fetch Metadata & Verify
+        const topicId = recognizedText.toLowerCase().replace(/\s+/g, '-');
+        let docMetadata: EducationalMetadata | null = null;
         try {
-          const topicId = recognizedText.toLowerCase().replace(/\s+/g, '-');
-          const docMetadata = await dataHubService.fetchMetadata(topicId);
-          setMetadata(docMetadata);
-
-          if (docMetadata) {
-            await speakSilently(`Verified. I've loaded the outline for ${docMetadata.documentId}. Starting lesson now.`);
-            // Transition to actual reading
-            setDocument({ id: topicId, title: recognizedText, totalPages: 10, pages: [], metadata: {}, uri: '' });
-            setCurrentPage(1);
-            transitionState('AI_SPEAKING');
-          }
+          docMetadata = await dataHubService.fetchMetadata(topicId);
         } catch (e) {
-          console.warn("Metadata verification failed, falling back to basic reading.");
-          transitionState('PAUSED');
+          console.warn("Metadata verification failed, using offline outline.", e);
         }
+        setMetadata(docMetadata);
+
+        const lessonDoc = buildLessonDocument(topicId, recognizedText, docMetadata);
+        documentRef.current = lessonDoc;
+        setDocument(lessonDoc);
+        setCurrentPage(1);
+        transitionState('AI_SPEAKING');
+        await speakSilently(`Verified. I've loaded the outline for ${lessonDoc.title}. Starting lesson now.`);
+        await startReading({ startPage: 1, endPage: lessonDoc.totalPages, type: 'pages' });
       }
       return;
     }
 
     if (state === 'LISTENING') {
       await audioMutex.releaseRecordingLock();
+
+      if (!recognizedText.trim()) {
+        await speakSilently("I didn't catch that. Please try again.", {
+          onDone: () => {
+            transitionState('PAUSED');
+          },
+        });
+        return;
+      }
+
       const { action, offlineMessage } = await voiceCommandParser.processCommand(recognizedText);
 
       if (offlineMessage) {
@@ -306,12 +441,54 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       // Route commands
       if (action.type === 'AI_QUERY') {
         await askQuestion(recognizedText);
-      } else {
-        // Handle local navigation commands...
-        transitionState('PAUSED');
+        return;
+      }
+
+      const doc = documentRef.current;
+      const page = currentPage;
+
+      switch (action.type) {
+        case 'RESUME':
+          if (doc && page >= 1) {
+            await startReading({ startPage: page, endPage: doc.totalPages, type: 'pages' });
+          } else {
+            transitionState('PAUSED');
+          }
+          break;
+        case 'NEXT':
+          if (doc && page < doc.totalPages) {
+            setCurrentPage(page + 1);
+            await speakSilently(doc.pages[page]?.text ?? 'You have reached the end of the document.');
+          } else {
+            await speakSilently('You are already at the end of the document.');
+          }
+          transitionState('PAUSED');
+          break;
+        case 'BACK':
+          if (doc && page > 1) {
+            setCurrentPage(page - 1);
+            await speakSilently(doc.pages[page - 2]?.text ?? 'This is the start of the document.');
+          } else {
+            await speakSilently('You are already at the start of the document.');
+          }
+          transitionState('PAUSED');
+          break;
+        case 'REPEAT':
+          if (doc && page >= 1 && doc.pages[page - 1]?.text) {
+            await speakSilently(doc.pages[page - 1].text as string);
+          } else {
+            await speakSilently("There is no content to repeat yet.");
+          }
+          transitionState('PAUSED');
+          break;
+        case 'PAUSE':
+        case 'STOP':
+        default:
+          transitionState('PAUSED');
+          break;
       }
     }
-  }, [state, onboardingStep, transitionState, speakSilently, askQuestion]);
+  }, [state, onboardingStep, currentPage, transitionState, speakSilently, askQuestion, startReading]);
 
   const contextValue: TeacherContext = {
     state,
