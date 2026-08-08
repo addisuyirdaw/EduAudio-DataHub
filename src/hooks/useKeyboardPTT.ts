@@ -15,7 +15,7 @@ import { Platform } from 'react-native';
 
 const PTT_KEYS = new Set(['Space', 'KeyM']);
 
-function isEditableTarget(target: EventTarget | null): boolean {
+export function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   const tag = target.tagName;
   return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;

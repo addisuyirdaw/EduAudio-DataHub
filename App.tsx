@@ -15,19 +15,28 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import React, { useEffect, useState } from 'react';
-import { SafeAreaView, StyleSheet, View, Text, Pressable } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { SafeAreaView, StyleSheet, View, Text, Pressable, Platform } from 'react-native';
 import { Audio } from 'expo-av';
+import * as Speech from 'expo-speech';
 import { EducationalAudioPlayer } from './src/components/EducationalAudioPlayer';
 import { AITeacherScreen } from './src/components/AITeacherScreen';
-import { useKeyboardPTT } from './src/hooks/useKeyboardPTT';
+import { useKeyboardPTT, isEditableTarget } from './src/hooks/useKeyboardPTT';
 import { audioMutex } from './src/context/AudioMutex';
+import { modeBridge } from './src/services/modeBridge';
 import { Colors, Typography, Spacing, Radius } from './src/styles/theme';
 
 type Mode = 'player' | 'teacher';
 
 export default function App() {
   const [mode, setMode] = useState<Mode>('player');
+  // Ref mirror of `mode` so async callbacks (mode bridge, hotkeys) can read
+  // the latest value without re-subscribing on every change.
+  const modeRef = useRef<Mode>('player');
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
 
   useEffect(() => {
     // Configure audio mode for AI Teacher Mode
@@ -51,15 +60,63 @@ export default function App() {
   }, []);
 
   /**
+   * Spoken confirmation of a mode change. Switching to the AI Teacher skips
+   * the announcement because the teacher always greets / starts reading out
+   * loud the moment it mounts, which already confirms the new mode.
+   */
+  const announceMode = useCallback(async (nextMode: Mode): Promise<void> => {
+    if (nextMode === 'teacher') return;
+    try {
+      await Speech.stop();
+      Speech.speak('Audio player mode. Press T to switch back to the AI teacher.', {
+        language: 'en-US',
+        rate: 0.95,
+      });
+    } catch (error) {
+      console.warn('[App] Mode announcement failed:', error);
+    }
+  }, []);
+
+  /**
    * Audio isolation on tab switch: stop any in-flight TTS / mutex-tracked
    * playback before the screen swap, so the AI Teacher's spoken greeting never
    * bleeds into the player and vice-versa. The Audio Player's own sound is
-   * stopped by its unmount cleanup.
+   * stopped by its unmount cleanup. Announces the new mode out loud.
    */
-  const switchMode = async (nextMode: Mode): Promise<void> => {
+  const switchMode = useCallback(async (nextMode: Mode): Promise<void> => {
+    if (modeRef.current === nextMode) return;
     await audioMutex.hardPause();
+    modeRef.current = nextMode;
     setMode(nextMode);
-  };
+    await announceMode(nextMode);
+  }, [announceMode]);
+
+  // 'T' hotkey toggles between Audio Player and AI Teacher (web builds) for
+  // keyboard and screen-reader users. Guarded against editable targets so
+  // typing a "t" in the fallback command input never flips screens.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.code !== 'KeyT') return;
+      if (event.repeat) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isEditableTarget(event.target)) return;
+      event.preventDefault();
+      void switchMode(modeRef.current === 'player' ? 'teacher' : 'player');
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [switchMode]);
+
+  // Voice / command mode-switch requests (e.g. saying "player" to the AI
+  // Teacher) are routed up from the teacher's live keyword matcher.
+  useEffect(() => {
+    return modeBridge.subscribe((requested) => {
+      void switchMode(requested);
+    });
+  }, [switchMode]);
 
   /**
    * Spacebar / M on the AUDIO PLAYER tab: stop playback immediately and hand
@@ -71,6 +128,7 @@ export default function App() {
       void (async () => {
         await audioMutex.hardPause();
         setMode('teacher');
+        modeRef.current = 'teacher';
       })();
     },
     () => {},
@@ -79,12 +137,13 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <View style={styles.modeSwitcher}>
+      <View style={styles.modeSwitcher} accessibilityRole="tablist">
         <Pressable
           onPress={() => switchMode('player')}
           accessible={true}
-          accessibilityRole="button"
-          accessibilityLabel="Switch to audio player mode"
+          accessibilityRole="tab"
+          accessibilityLabel="Audio player mode"
+          accessibilityHint="Plays the lecture audio"
           accessibilityState={{ selected: mode === 'player' }}
           style={[
             styles.modeButton,
@@ -104,8 +163,9 @@ export default function App() {
         <Pressable
           onPress={() => switchMode('teacher')}
           accessible={true}
-          accessibilityRole="button"
-          accessibilityLabel="Switch to AI teacher mode"
+          accessibilityRole="tab"
+          accessibilityLabel="AI teacher mode"
+          accessibilityHint="Interactive voice tutor with hands-free commands"
           accessibilityState={{ selected: mode === 'teacher' }}
           style={[
             styles.modeButton,

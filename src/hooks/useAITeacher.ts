@@ -14,6 +14,7 @@ import { useVoiceRecognition, type LiveVoiceCommand } from './useVoiceRecognitio
 import { useTextToSpeech } from './useTextToSpeech';
 import { dataHubService } from '../services/DataHubService';
 import { recognitionBridge } from '../services/recognitionBridge';
+import { modeBridge } from '../services/modeBridge';
 import type { PageRange, TeacherState } from '../types/teacher.types';
 
 export interface UseAITeacherReturn {
@@ -81,14 +82,19 @@ export function useAITeacher(): UseAITeacherReturn {
   }, [context, voiceRecognition]);
 
   /**
-   * Instant keyword navigation: fired by the recognizer the moment a live
-   * transcript (interim or final) contains a navigation keyword, so page
-   * transitions never wait for the speech session to end. Reuses the FSM
-   * command router which advances the page and reads it aloud via TTS.
+   * Instant keyword commands: fired by the recognizer the moment a live
+   * transcript (interim or final) contains a keyword, so the action never
+   * waits for the speech session to end. Page-navigation commands reuse the
+   * FSM command router; mode-switch commands are handed to the top-level mode
+   * bridge, which swaps screens, isolates audio, and speaks the new mode.
    */
   const handleLiveCommand = useCallback(async (command: LiveVoiceCommand, transcript: string) => {
     liveCommandHandledRef.current = true;
     console.log(`[useAITeacher] Live command: ${command} ("${transcript}")`);
+    if (command === 'player' || command === 'teacher') {
+      modeBridge.requestMode(command);
+      return;
+    }
     try {
       await context.submitTextCommand(command);
     } catch (error) {

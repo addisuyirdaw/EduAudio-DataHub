@@ -21,6 +21,7 @@ import { EducationalMetadata, dataHubService } from '../services/DataHubService'
 import { audioMutex } from './AudioMutex';
 import { voiceCommandParser, ParsedVoiceCommand } from '../services/voiceCommandParser.service';
 import { recognitionBridge } from '../services/recognitionBridge';
+import { modeBridge, ModeRequest } from '../services/modeBridge';
 
 interface TeacherContextProviderProps {
   children: React.ReactNode;
@@ -102,6 +103,17 @@ function buildPagePrompt(page: number, totalPages: number): string {
 }
 
 /**
+ * Detect a mode-switch request ("player" / "teacher") in spoken or typed
+ * command text. Word-boundary matching avoids matching inside other words.
+ */
+function resolveModeSwitch(text: string): ModeRequest | null {
+  const cleanText = text.toLowerCase().trim();
+  if (/(?:^|\W)(?:player)(?:$|\W)/.test(cleanText)) return 'player';
+  if (/(?:^|\W)(?:teacher)(?:$|\W)/.test(cleanText)) return 'teacher';
+  return null;
+}
+
+/**
  * Teacher Context Provider
  * Implements the FSM and provides actions for state transitions
  */
@@ -123,6 +135,12 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   const isTransitioningRef = useRef(false);
   const documentRef = useRef<ParsedDocument | null>(null);
   const stopReadingRef = useRef(false);
+  // Page number whose reading is already handled by an internal speaker
+  // (the startReading loop, loadDocument, onboarding, greeting). The
+  // auto-read effect skips that page and speaks any OTHER page change.
+  const handledPageRef = useRef(0);
+  // Last page that rendered, so the auto-read effect can detect real changes.
+  const prevPageRef = useRef(0);
 
   // Auto-load a default lesson document on mount so the AI Teacher always
   // renders "PAGE 1 OF X" + real lesson text immediately, even before the
@@ -150,6 +168,37 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-read lesson loop: whenever currentPage changes through a path that
+  // does NOT announce itself (e.g. voice NEXT/BACK navigation), stop any
+  // in-flight TTS, read the new page aloud with the short prompt, then
+  // re-arm the hands-free microphone. Pages already spoken by internal paths
+  // (startReading loop, loadDocument, onboarding, greeting) are skipped via
+  // handledPageRef.
+  useEffect(() => {
+    const prev = prevPageRef.current;
+    prevPageRef.current = currentPage;
+    if (currentPage < 1 || !documentRef.current) return;
+    if (prev === 0) return; // initial mount: greeting / onboarding owns page 1
+    if (handledPageRef.current === currentPage) {
+      handledPageRef.current = 0;
+      return;
+    }
+
+    const doc = documentRef.current;
+    console.log(`[TeacherContext] Page changed to ${currentPage}, auto-reading`);
+    void (async () => {
+      await audioMutex.hardPause();
+      if (stateTransitionRef.current !== 'ONBOARDING') {
+        transitionState('AI_SPEAKING');
+      }
+      await speakSilently(buildPagePrompt(currentPage, doc.totalPages));
+      if (stateTransitionRef.current !== 'ONBOARDING') {
+        await rearmAutoListen();
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPage]);
 
   // Subscribe to audio mutex state changes
   useEffect(() => {
@@ -265,12 +314,14 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     const doc = documentRef.current;
     if (!doc || doc.totalPages < 1) return;
 
+    handledPageRef.current = 1;
     setCurrentPage(1);
     transitionState('AI_SPEAKING');
     const greeting =
       `Welcome to EduAudio! I am your AI Teacher. Press Spacebar or speak commands to navigate. ` +
       `Would you like to learn page 1 or go next? ` +
-      `Say next to continue, say again to repeat, or say back for the previous page.`;
+      `Say next to continue, say again to repeat, or say back for the previous page. ` +
+      `To switch to the audio player, say player.`;
     await speakSilently(greeting);
     await rearmAutoListen();
   }, [speakSilently, transitionState, rearmAutoListen]);
@@ -308,6 +359,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       }
 
       setCurrentPage(1);
+      handledPageRef.current = 1;
       transitionState('PAUSED');
       await speakSilently("Document loaded and verified. I'm ready when you are.");
     } catch (error) {
@@ -335,6 +387,9 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     for (let page = range.startPage; page <= endPage; page++) {
       const pageText = doc.pages[page - 1]?.text;
       if (!pageText) break;
+      // The loop speaks each page itself; mark it so the auto-read effect
+      // does not double-announce the same page.
+      handledPageRef.current = page;
       setCurrentPage(page);
       // Speak a short instructional prompt, not the full page text, so the
       // demo stays snappy and the user (or judge) always knows the next step.
@@ -348,6 +403,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
 
     // Only fall back to PAUSED on natural completion; an interruption already
     // moved the FSM to LISTENING (the fromState guard makes this safe).
+    handledPageRef.current = 0;
     if (!interrupted) {
       transitionState('PAUSED', 'AI_SPEAKING');
       // Speak-then-listen: after the page finishes, open the mic hands-free.
@@ -445,7 +501,18 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
    * Shared by the voice LISTENING path and the fallback text input.
    */
   const processCommandText = useCallback(async (text: string): Promise<void> => {
-    const { action, offlineMessage } = await voiceCommandParser.processCommand(text);
+    const trimmed = text.trim();
+
+    // Mode-switch commands (spoken or typed): hand off to the top-level mode
+    // bridge, which swaps screens, isolates audio, and speaks the new mode.
+    const modeRequest = resolveModeSwitch(trimmed);
+    if (modeRequest) {
+      await audioMutex.hardPause();
+      modeBridge.requestMode(modeRequest);
+      return;
+    }
+
+    const { action, offlineMessage } = await voiceCommandParser.processCommand(trimmed);
 
     if (offlineMessage) {
       await speakSilently(offlineMessage);
@@ -474,25 +541,25 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
         break;
       case 'NEXT':
         if (doc && page < doc.totalPages) {
-          const nextPage = page + 1;
-          setCurrentPage(nextPage);
-          await speakSilently(buildPagePrompt(nextPage, doc.totalPages));
+          // Page change only: the auto-read currentPage effect stops any
+          // in-flight TTS, reads the new page aloud, and re-arms the mic.
+          setCurrentPage(page + 1);
+          transitionState('PAUSED');
         } else {
           await speakSilently('You are already at the end of the document. Say back for the previous page.');
+          transitionState('PAUSED');
+          await rearmAutoListen();
         }
-        transitionState('PAUSED');
-        await rearmAutoListen();
         break;
       case 'BACK':
         if (doc && page > 1) {
-          const prevPage = page - 1;
-          setCurrentPage(prevPage);
-          await speakSilently(buildPagePrompt(prevPage, doc.totalPages));
+          setCurrentPage(page - 1);
+          transitionState('PAUSED');
         } else {
           await speakSilently('You are already at the start of the document. Say next to continue.');
+          transitionState('PAUSED');
+          await rearmAutoListen();
         }
-        transitionState('PAUSED');
-        await rearmAutoListen();
         break;
       case 'REPEAT':
         if (doc && page >= 1 && doc.pages[page - 1]?.text) {
@@ -552,6 +619,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       const lessonDoc = buildLessonDocument(topicId, text, docMetadata);
       documentRef.current = lessonDoc;
       setDocument(lessonDoc);
+      handledPageRef.current = 1;
       setCurrentPage(1);
       transitionState('AI_SPEAKING');
       await speakSilently(`Verified. I've loaded the outline for ${lessonDoc.title}. Starting lesson now.`);

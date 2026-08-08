@@ -49,9 +49,11 @@ export interface StartListeningOptions {
 }
 
 /**
- * Navigation commands triggered instantly on live transcript keyword matches.
+ * Commands triggered instantly on live transcript keyword matches.
+ * 'player' / 'teacher' are mode-switch requests handed to the top-level
+ * mode bridge; the rest are page-navigation commands.
  */
-export type LiveVoiceCommand = 'next' | 'back' | 'repeat';
+export type LiveVoiceCommand = 'next' | 'back' | 'repeat' | 'player' | 'teacher';
 
 /**
  * Resolve an instant navigation keyword from the live transcript.
@@ -62,6 +64,8 @@ function resolveLiveCommand(cleanText: string): LiveVoiceCommand | null {
   if (/(?:^|\W)(?:next|continue|forward)(?:$|\W)/.test(cleanText)) return 'next';
   if (/(?:^|\W)(?:back|previous)(?:$|\W)/.test(cleanText)) return 'back';
   if (/(?:^|\W)(?:repeat|again)(?:$|\W)/.test(cleanText)) return 'repeat';
+  if (/(?:^|\W)(?:player)(?:$|\W)/.test(cleanText)) return 'player';
+  if (/(?:^|\W)(?:teacher)(?:$|\W)/.test(cleanText)) return 'teacher';
   return null;
 }
 
