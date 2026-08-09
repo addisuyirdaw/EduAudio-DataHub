@@ -67,6 +67,20 @@ export function useAITeacher(): UseAITeacherReturn {
   // Set when an instant keyword command (next/back/repeat) already performed
   // page navigation, so the matching push-to-talk release does not re-run it.
   const liveCommandHandledRef = useRef(false);
+  // True while the barge-in mic (pause-only, active during AI_SPEAKING) is
+  // supposed to be open, so PTT/auto-listen knows it may need to close it.
+  const bargeInArmedRef = useRef(false);
+
+  /**
+   * Let Chrome/Android settle after stopping a barge-in session before
+   * starting a normal one (stop() then start() too quickly throws
+   * InvalidStateError).
+   */
+  const settleAfterBargeIn = useCallback(async (stopped: boolean) => {
+    if (stopped) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }, []);
 
   /**
    * Hands-free capture: a recognized final transcript arrives straight from
@@ -139,18 +153,44 @@ export function useAITeacher(): UseAITeacherReturn {
       if (reason === 'autoListen') {
         autoListenRef.current = true;
         liveCommandHandledRef.current = false;
-        void voiceRecognition.startListening({
-          onFinalResult: handleAutoCapture,
-          onLiveCommand: handleLiveCommand,
+        void (async () => {
+          // Close any barge-in mic (pause-only, open while the teacher spoke)
+          // before the normal hands-free session takes over.
+          await settleAfterBargeIn(await voiceRecognition.stopPauseOnly());
+          await voiceRecognition.startListening({
+            onFinalResult: handleAutoCapture,
+            onLiveCommand: handleLiveCommand,
+          });
         });
       } else if (reason === 'ttsFinished') {
         if (isHoldingRef.current) {
           liveCommandHandledRef.current = false;
-          void voiceRecognition.startListening({ onLiveCommand: handleLiveCommand });
+          void (async () => {
+            await settleAfterBargeIn(await voiceRecognition.stopPauseOnly());
+            await voiceRecognition.startListening({ onLiveCommand: handleLiveCommand });
+          });
         }
       }
     });
-  }, [voiceRecognition, handleAutoCapture, handleLiveCommand]);
+  }, [voiceRecognition, handleAutoCapture, handleLiveCommand, settleAfterBargeIn]);
+
+  /**
+   * Barge-in: while the teacher is speaking (AI_SPEAKING) keep a narrow mic
+   * open that reacts only to "stop"/"pause"/"wait", so the student can
+   * interrupt the lesson mid-sentence. The recognizer ignores every other
+   * transcript — including the teacher's own voice echoing into the mic — so
+   * the AI can never trigger itself while reading aloud.
+   */
+  useEffect(() => {
+    if (context.state === 'AI_SPEAKING') {
+      if (!bargeInArmedRef.current) {
+        bargeInArmedRef.current = true;
+        void voiceRecognition.startListening({ pauseOnly: true, onLiveCommand: handleLiveCommand });
+      }
+    } else {
+      bargeInArmedRef.current = false;
+    }
+  }, [context.state, voiceRecognition, handleLiveCommand]);
 
   // Sync status messages with FSM state
   useEffect(() => {
@@ -198,6 +238,9 @@ export function useAITeacher(): UseAITeacherReturn {
       if (shouldListen) {
         // Let hardPause finish stopping TTS before the mic opens (audio focus).
         await new Promise((resolve) => setTimeout(resolve, 150));
+        // If the barge-in mic is open (teacher was speaking), close it so this
+        // push-to-talk session's options win.
+        await settleAfterBargeIn(await voiceRecognition.stopPauseOnly());
         await voiceRecognition.startListening({ onLiveCommand: handleLiveCommand });
       }
     } catch (error) {

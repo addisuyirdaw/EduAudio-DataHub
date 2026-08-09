@@ -17,6 +17,9 @@
  * - Every result is checked against `Speech.isSpeakingAsync()` and dropped
  *   while the AI is speaking out loud, so the AI's own TTS output can never
  *   be captured back into the mic and re-routed as a phantom command.
+ * - Barge-in: with `pauseOnly`, the mic stays open WHILE the teacher speaks
+ *   but only an instant "stop"/"pause"/"wait" keyword is acted on (the echo
+ *   guard is bypassed in this mode so the student can interrupt).
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -33,6 +36,7 @@ export interface UseVoiceRecognitionReturn {
 
   startListening: (options?: StartListeningOptions) => Promise<void>;
   stopListening: () => Promise<string>;
+  stopPauseOnly: () => Promise<boolean>;
   destroy: () => void;
   resetRecognizedText: () => void;
 }
@@ -46,6 +50,10 @@ export interface UseVoiceRecognitionReturn {
 export interface StartListeningOptions {
   onFinalResult?: (text: string) => void;
   onLiveCommand?: (command: LiveVoiceCommand, transcript: string) => void;
+  /** Barge-in mode: open the mic while the teacher speaks but only react to
+   *  an instant "stop"/"pause"/"wait" keyword; all other transcripts are
+   *  ignored (including the teacher's own voice echoing into the mic). */
+  pauseOnly?: boolean;
 }
 
 /**
@@ -111,12 +119,20 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const finalResultRef = useRef<((text: string) => void) | null>(null);
   const liveCommandRef = useRef<((command: LiveVoiceCommand, transcript: string) => void) | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pauseOnlyRef = useRef(false);
 
   const startListening = useCallback(async (options?: StartListeningOptions) => {
     if (activeRef.current) return;
 
-    finalResultRef.current = options?.onFinalResult ?? null;
-    liveCommandRef.current = options?.onLiveCommand ?? null;
+    // A restart call (auto-restart from onend/onerror) passes no options.
+    // Preserve the session's callbacks in that case — otherwise the first
+    // restart wipes the live-command handler and every keyword heard
+    // afterwards is displayed but never routed.
+    if (options) {
+      finalResultRef.current = options.onFinalResult ?? null;
+      liveCommandRef.current = options.onLiveCommand ?? null;
+      pauseOnlyRef.current = options.pauseOnly ?? false;
+    }
 
     try {
       setError(null);
@@ -174,12 +190,18 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     setError(null);
     console.log('[VoiceRecognition] Speech recognition started');
     // Mic is live: silence any TTS output so the mic is never blocked.
+    // Skipped in barge-in mode, where the mic intentionally opens WHILE the
+    // teacher is speaking so the student can interrupt with "stop".
     try {
-      Speech.stop();
+      if (!pauseOnlyRef.current) {
+        Speech.stop();
+      }
     } catch {
       // ignore
     }
-    playChime('start');
+    if (!pauseOnlyRef.current) {
+      playChime('start');
+    }
   };
 
   const onSpeechRecognized = () => {
@@ -215,6 +237,32 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       const text = e.value[0];
       void (async () => {
         try {
+          // Barge-in mode: while the teacher speaks, only an instant
+          // "stop"/"pause"/"wait" keyword matters. Everything else — including
+          // the teacher's own voice echoing into the mic — is ignored so the
+          // AI can never trigger itself while reading aloud.
+          if (pauseOnlyRef.current) {
+            const cleanText = text.toLowerCase().trim();
+            if (resolveLiveCommand(cleanText) === 'pause' && !stopRequestedRef.current) {
+              stopRequestedRef.current = true;
+              keepAliveRef.current = false;
+              const handler = liveCommandRef.current;
+              liveCommandRef.current = null;
+              finalResultRef.current = null;
+              console.log(`[VoiceRecognition] Barge-in pause matched ("${cleanText}")`);
+              if (handler) {
+                void (async () => {
+                  await stopListening();
+                  latestResultRef.current = '';
+                  handler('pause', cleanText);
+                })();
+              } else {
+                void stopListening();
+              }
+            }
+            return;
+          }
+
           // Echo guard: if the AI is speaking out loud right now, this audio
           // is its own voice echoing back into the mic. Drop it.
           if (await Speech.isSpeakingAsync()) {
@@ -277,6 +325,32 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       const partialText = e.value[0];
       void (async () => {
         try {
+          // Barge-in mode: while the teacher speaks, only an instant
+          // "stop"/"pause"/"wait" keyword matters. Everything else — including
+          // the teacher's own voice echoing into the mic — is ignored so the
+          // AI can never trigger itself while reading aloud.
+          if (pauseOnlyRef.current) {
+            const cleanText = partialText.toLowerCase().trim();
+            if (resolveLiveCommand(cleanText) === 'pause' && !stopRequestedRef.current) {
+              stopRequestedRef.current = true;
+              keepAliveRef.current = false;
+              const handler = liveCommandRef.current;
+              liveCommandRef.current = null;
+              finalResultRef.current = null;
+              console.log(`[VoiceRecognition] Barge-in pause matched ("${cleanText}")`);
+              if (handler) {
+                void (async () => {
+                  await stopListening();
+                  latestResultRef.current = '';
+                  handler('pause', cleanText);
+                })();
+              } else {
+                void stopListening();
+              }
+            }
+            return;
+          }
+
           // Echo guard: ignore interim results captured while the AI's own
           // TTS is playing out loud.
           if (await Speech.isSpeakingAsync()) {
@@ -353,10 +427,13 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
    * resolve, keeping the "stop then read recognizedText" flow in sync.
    */
   const stopListening = useCallback(async (): Promise<string> => {
+    const wasActive = activeRef.current;
+    const wasPauseOnly = pauseOnlyRef.current;
     keepAliveRef.current = false;
     stopRequestedRef.current = true;
     finalResultRef.current = null;
     liveCommandRef.current = null;
+    pauseOnlyRef.current = false;
 
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);
@@ -373,6 +450,18 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     setIsRecognizing(false);
     activeRef.current = false;
 
+    // No session was running, or a pause-only barge-in session: there is no
+    // pending student transcript to wait for, resolve immediately.
+    if (!wasActive || wasPauseOnly) {
+      const text = latestResultRef.current;
+      setRecognizedText(wasPauseOnly ? '' : text);
+      console.log(`[VoiceRecognition] Stopped listening (result: "${text || '<empty>'}")`);
+      if (!wasPauseOnly) {
+        playChime('end');
+      }
+      return text;
+    }
+
     // The final onSpeechResults event is delivered asynchronously after stop().
     const deadline = Date.now() + 1500;
     while (!latestResultRef.current && Date.now() < deadline) {
@@ -387,6 +476,21 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   }, []);
 
   /**
+   * Close only a pause-only barge-in session (no-op while a normal listening
+   * session is active). Used when the normal auto-listen / push-to-talk flow
+   * needs to take the mic over from barge-in. Returns true if a barge-in
+   * session was actually stopped, so callers can let the platform settle
+   * before starting a new session.
+   */
+  const stopPauseOnly = useCallback(async (): Promise<boolean> => {
+    if (pauseOnlyRef.current) {
+      await stopListening();
+      return true;
+    }
+    return false;
+  }, [stopListening]);
+
+  /**
    * Destroy voice recognition instance
    */
   const destroy = useCallback(() => {
@@ -394,6 +498,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     stopRequestedRef.current = true;
     finalResultRef.current = null;
     liveCommandRef.current = null;
+    pauseOnlyRef.current = false;
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;
@@ -421,6 +526,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     error,
     startListening,
     stopListening,
+    stopPauseOnly,
     destroy,
     resetRecognizedText,
   };
