@@ -339,6 +339,13 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
    */
   const rearmAutoListen = useCallback(async () => {
     if (stateTransitionRef.current === 'LISTENING') return;
+    // Strictly wait for any in-flight TTS to finish (or be cancelled) before
+    // opening the mic, so the AI's own voice can never be captured back as a
+    // phantom command. Bounded so a stuck TTS engine cannot hang the loop.
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline && (await Speech.isSpeakingAsync())) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     if (stateTransitionRef.current !== 'ONBOARDING') {
       transitionState('LISTENING');
     }
@@ -421,12 +428,11 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     }
 
     const clamped = Math.max(1, Math.min(pageNumber, doc.totalPages));
-    const heading = doc.pages[clamped - 1]?.headings?.[0]?.text ?? `Page ${clamped}`;
     setCurrentPage(clamped);
     pendingTeachPageRef.current = clamped;
     setPendingTeachPage(clamped);
     transitionState('AI_SPEAKING');
-    await speakSilently(`Page ${clamped}: ${heading}. Ready for me to explain this section?`);
+    await speakSilently(`Moved to Page ${clamped}. Say 'go ahead' to begin the detailed explanation.`);
     await rearmAutoListen();
   }, [transitionState, speakSilently, rearmAutoListen]);
 
@@ -629,6 +635,22 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   }, [transitionState]);
 
   /**
+   * Instant voice interruption ("stop", "pause", "wait", "be quiet"): cancel
+   * all active speech right away, move the FSM to PAUSED, then after a short
+   * delay quietly acknowledge the pause and re-arm the hands-free mic so the
+   * student can say 'go ahead' or 'continue' when ready.
+   */
+  const pauseAndConfirm = useCallback(async (): Promise<void> => {
+    stopReadingRef.current = true;
+    await Speech.stop();
+    await audioMutex.releaseTTSLock();
+    transitionState('PAUSED');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await speakSilently("Paused. Say 'go ahead' or 'continue' when you're ready.");
+    await rearmAutoListen();
+  }, [transitionState, speakSilently, rearmAutoListen]);
+
+  /**
    * Handle touch down
    * Returns true when voice recognition should start immediately (the
    * onboarding prompt is not speaking). During IDLE the prompt speaks and the
@@ -744,7 +766,9 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
         } else if (explicitPage != null) {
           await announcePage(explicitPage);
         } else {
-          await announcePage(page >= 1 ? page : 1);
+          // "go ahead" / "teach me" / "start" with no pending announcement:
+          // the student is asking to begin, so teach the current page.
+          await teachPage(page >= 1 ? page : 1);
         }
         break;
       }
@@ -883,6 +907,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     activateListening,
     askQuestion,
     cancelListening,
+    pauseAndConfirm,
     clearError,
     handleTouchDown,
     handleTouchUp,

@@ -169,6 +169,7 @@ export interface TeacherContext {
   activateListening: () => Promise<void>;
   askQuestion: (question: string) => Promise<void>;
   cancelListening: () => Promise<void>;
+  pauseAndConfirm: () => Promise<void>;
   clearError: () => void;
   handleTouchDown: () => Promise<boolean>;
   handleTouchUp: (recognizedText: string) => Promise<void>;

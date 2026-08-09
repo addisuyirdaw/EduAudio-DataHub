@@ -14,6 +14,9 @@
  *   the hands-free auto-listen loop; it is cleared again by `stopListening`.
  * - `stopListening` returns the latest recognized transcript (polled from the
  *   async onSpeechResults event that arrives after stop()).
+ * - Every result is checked against `Speech.isSpeakingAsync()` and dropped
+ *   while the AI is speaking out loud, so the AI's own TTS output can never
+ *   be captured back into the mic and re-routed as a phantom command.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -51,7 +54,7 @@ export interface StartListeningOptions {
  * mode bridge; 'greeting' routes the full sentence to the teacher engine
  * for a friendly spoken response; the rest are page-navigation commands.
  */
-export type LiveVoiceCommand = 'next' | 'back' | 'repeat' | 'player' | 'teacher' | 'greeting';
+export type LiveVoiceCommand = 'next' | 'back' | 'repeat' | 'player' | 'teacher' | 'greeting' | 'pause';
 
 /**
  * Resolve an instant navigation keyword from the live transcript.
@@ -62,6 +65,9 @@ function resolveLiveCommand(cleanText: string): LiveVoiceCommand | null {
   if (/(?:^|\W)(?:next|continue|forward)(?:$|\W)/.test(cleanText)) return 'next';
   if (/(?:^|\W)(?:back|previous)(?:$|\W)/.test(cleanText)) return 'back';
   if (/(?:^|\W)(?:repeat|again)(?:$|\W)/.test(cleanText)) return 'repeat';
+  // Instant interruption: "stop", "pause", "wait", "be quiet" cancel all
+  // speech right away and move the teacher to a paused state.
+  if (/(?:^|\W)(?:stop|pause|wait|be quiet|quiet)(?:$|\W)/.test(cleanText)) return 'pause';
   // Greetings are checked before mode words so "hi teacher" greets instead
   // of being swallowed by the (no-op) teacher mode-switch request.
   if (/(?:^|\W)(?:hello|hi|hey|good morning|good afternoon|good evening)(?:$|\W)/.test(cleanText)) return 'greeting';
@@ -190,35 +196,47 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const onSpeechResults = (e: any) => {
     if (e.value && e.value.length > 0) {
       const text = e.value[0];
-      latestResultRef.current = text;
-      setRecognizedText(text);
-      console.log('STT Captured:', text);
+      void (async () => {
+        try {
+          // Echo guard: if the AI is speaking out loud right now, this audio
+          // is its own voice echoing back into the mic. Drop it.
+          if (await Speech.isSpeakingAsync()) {
+            console.log(`[VoiceRecognition] Ignoring "${text}" while TTS is active`);
+            return;
+          }
+          latestResultRef.current = text;
+          setRecognizedText(text);
+          console.log('STT Captured:', text);
 
-      // Real-time keyword evaluation on final results (see onSpeechPartialResults
-      // for interim). Navigation never waits for the session to end.
-      const cleanText = text.toLowerCase().trim();
-      const liveCommand = resolveLiveCommand(cleanText);
-      if (liveCommand && !stopRequestedRef.current) {
-        stopRequestedRef.current = true;
-        keepAliveRef.current = false;
-        const handler = liveCommandRef.current;
-        liveCommandRef.current = null;
-        finalResultRef.current = null;
-        console.log(`[VoiceRecognition] Live command matched: ${liveCommand} ("${cleanText}")`);
-        if (handler) {
-          void (async () => {
-            const captured = await stopListening();
-            handler(liveCommand, captured || text);
-          })();
-        } else {
-          void stopListening();
+          // Real-time keyword evaluation on final results (see onSpeechPartialResults
+          // for interim). Navigation never waits for the session to end.
+          const cleanText = text.toLowerCase().trim();
+          const liveCommand = resolveLiveCommand(cleanText);
+          if (liveCommand && !stopRequestedRef.current) {
+            stopRequestedRef.current = true;
+            keepAliveRef.current = false;
+            const handler = liveCommandRef.current;
+            liveCommandRef.current = null;
+            finalResultRef.current = null;
+            console.log(`[VoiceRecognition] Live command matched: ${liveCommand} ("${cleanText}")`);
+            if (handler) {
+              void (async () => {
+                const captured = await stopListening();
+                handler(liveCommand, captured || text);
+              })();
+            } else {
+              void stopListening();
+            }
+            return;
+          }
+
+          // Hands-free auto-listen loop: hand the recognized command to the
+          // teacher engine without requiring a push-to-talk release.
+          finalResultRef.current?.(text);
+        } catch (error) {
+          console.error('[VoiceRecognition] Result processing error:', error);
         }
-        return;
-      }
-
-      // Hands-free auto-listen loop: hand the recognized command to the
-      // teacher engine without requiring a push-to-talk release.
-      finalResultRef.current?.(text);
+      })();
     }
   };
 
@@ -226,27 +244,38 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     if (e.value && e.value.length > 0) {
       console.log('[VoiceRecognition] Partial result:', e.value[0]);
 
-      // Real-time keyword evaluation on interim results: act the moment a
-      // navigation keyword appears, before the speech session ends.
       const partialText = e.value[0];
-      const cleanText = partialText.toLowerCase().trim();
-      const liveCommand = resolveLiveCommand(cleanText);
-      if (liveCommand && !stopRequestedRef.current) {
-        stopRequestedRef.current = true;
-        keepAliveRef.current = false;
-        const handler = liveCommandRef.current;
-        liveCommandRef.current = null;
-        finalResultRef.current = null;
-        console.log(`[VoiceRecognition] Live command matched: ${liveCommand} ("${cleanText}")`);
-        if (handler) {
-          void (async () => {
-            const captured = await stopListening();
-            handler(liveCommand, captured || partialText);
-          })();
-        } else {
-          void stopListening();
+      void (async () => {
+        try {
+          // Echo guard: ignore interim results captured while the AI's own
+          // TTS is playing out loud.
+          if (await Speech.isSpeakingAsync()) {
+            return;
+          }
+          // Real-time keyword evaluation on interim results: act the moment a
+          // navigation keyword appears, before the speech session ends.
+          const cleanText = partialText.toLowerCase().trim();
+          const liveCommand = resolveLiveCommand(cleanText);
+          if (liveCommand && !stopRequestedRef.current) {
+            stopRequestedRef.current = true;
+            keepAliveRef.current = false;
+            const handler = liveCommandRef.current;
+            liveCommandRef.current = null;
+            finalResultRef.current = null;
+            console.log(`[VoiceRecognition] Live command matched: ${liveCommand} ("${cleanText}")`);
+            if (handler) {
+              void (async () => {
+                const captured = await stopListening();
+                handler(liveCommand, captured || partialText);
+              })();
+            } else {
+              void stopListening();
+            }
+          }
+        } catch (error) {
+          console.error('[VoiceRecognition] Partial result processing error:', error);
         }
-      }
+      })();
     }
   };
 

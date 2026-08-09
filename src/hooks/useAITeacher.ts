@@ -9,6 +9,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import * as Speech from 'expo-speech';
 import { useTeacherContext } from '../context/TeacherContext';
 import { useVoiceRecognition, type LiveVoiceCommand } from './useVoiceRecognition';
 import { useTextToSpeech } from './useTextToSpeech';
@@ -77,6 +78,12 @@ export function useAITeacher(): UseAITeacherReturn {
     if (!autoListenRef.current) return;
     autoListenRef.current = false;
     try {
+      // Echo guard: never route a transcript captured while the AI is still
+      // speaking out loud — it is the AI's own voice echoing into the mic.
+      if (await Speech.isSpeakingAsync()) {
+        console.log('[useAITeacher] Ignoring auto-capture while TTS is active');
+        return;
+      }
       // Close the mic (returns the latest transcript) before routing so the
       // response speech is never captured back into the recognizer.
       const spoken = await voiceRecognition.stopListening();
@@ -100,6 +107,12 @@ export function useAITeacher(): UseAITeacherReturn {
     console.log(`[useAITeacher] Live command: ${command} ("${transcript}")`);
     if (command === 'player' || command === 'teacher') {
       modeBridge.requestMode(command);
+      return;
+    }
+    // Instant "stop" / "pause" / "wait": cancel all active speech right away,
+    // move to a paused state, then acknowledge and re-arm the mic hands-free.
+    if (command === 'pause') {
+      await context.pauseAndConfirm();
       return;
     }
     try {
