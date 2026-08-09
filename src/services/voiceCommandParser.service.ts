@@ -4,28 +4,29 @@
  * Voice Command Parser Service
  * 
  * Parses voice input using regex patterns to identify local control commands
- * vs. AI queries. Handles offline fallback for network-dependent operations.
+ * (navigation, confirmation, mode switching, summarizing) vs. AI queries.
+ * Topic selection and navigation are fully offline; AI queries degrade
+ * gracefully in the teacher engine when no API key is configured.
  * 
  * ─────────────────────────────────────────────────────────────────────────────
  */
-
-import Network from 'expo-network';
 
 /**
  * Voice command types
  */
 export type VoiceCommandType =
-  | 'PAUSE'           // Pause playback
-  | 'STOP'            // Stop playback
-  | 'RESUME'          // Resume playback
-  | 'NEXT'            // Skip to next paragraph/page
-  | 'BACK'            // Go back to previous paragraph/page
-  | 'REPEAT'          // Repeat current content
-  | 'START'           // Start teaching / read a page aloud
-  | 'GO_TO'           // Jump to a specific page
-  | 'SUMMARIZE'       // Summarize the current lesson/chapter
-  | 'AI_QUERY'        // Query requiring AI processing
-  | 'UNKNOWN';        // Unrecognized command
+  | 'PAUSE'            // Pause playback
+  | 'STOP'             // Stop playback
+  | 'RESUME'           // Resume / re-confirm current section
+  | 'NEXT'             // Advance to the next page
+  | 'BACK'             // Go back to the previous page
+  | 'REPEAT'           // Repeat / re-explain current content
+  | 'START_TEACHING'   // Topic / confirmation to begin teaching
+  | 'SWITCH_PLAYER'    // Switch to the Audio Player mode
+  | 'SWITCH_TEACHER'   // Switch to the AI Teacher mode
+  | 'SUMMARIZE'        // Summarize the current lesson/chapter
+  | 'AI_QUERY'         // Query requiring AI processing
+  | 'UNKNOWN';         // Unrecognized command
 
 /**
  * Parsed voice command result
@@ -36,8 +37,8 @@ export interface ParsedVoiceCommand {
   requiresNetwork: boolean;   // Requires network connection
   originalText: string;
   parameters?: {
-    amount?: number;          // For "next 2 paragraphs"
-    target?: string | number; // For "go to chapter 3" (string) / "go to page 3" (number)
+    amount?: number;         // For "next 2" -> skip 2 pages
+    pageNumber?: number;     // For "read page 3" / "go to page 5"
   };
 }
 
@@ -46,106 +47,73 @@ export interface ParsedVoiceCommand {
  */
 class VoiceCommandParserService {
   /**
-   * Regex patterns for local commands
-   * Ordered by priority for matching
+   * Regex patterns for local commands.
+   * Ordered by priority for matching: questions and explicit page jumps are
+   * matched before generic control words so prefix collisions ("go back" vs
+   * "go", "explain why" vs "explain") route correctly.
    */
   private readonly commandPatterns: Array<{
     pattern: RegExp;
     type: VoiceCommandType;
     isLocal: boolean;
+    numberGroup?: number; // capture group holding a skip amount
+    pageGroup?: number;   // capture group holding an explicit page number
   }> = [
+    // Repeat commands (before questions so "what did you say" stays a repeat).
+    { pattern: /^(repeat|say that again|say again|again|what did you say)\b/i, type: 'REPEAT', isLocal: true },
+
+    // Clear questions (matched early so "explain why ..." stays a question).
+    { pattern: /^(what is|what are|why is|why are|why do|how is|how do|how does|when |where |which |who |can you|could you|tell me|explain why|explain how|explain what|define |describe |is |are )/i, type: 'AI_QUERY', isLocal: false },
+
     // Pause/Stop commands
-    { pattern: /^(pause|stop|halt|wait|hold)\b/i, type: 'PAUSE', isLocal: true },
-    { pattern: /^(stop|end|quit|exit)\b/i, type: 'STOP', isLocal: true },
+    { pattern: /^(pause|wait|hold|silence)\b/i, type: 'PAUSE', isLocal: true },
+    { pattern: /^(stop|end|quit|exit|halt)\b/i, type: 'STOP', isLocal: true },
 
-    // Direct page jumps: "go to page 3", "jump to page 2", "page 5"
-    { pattern: /^(?:go|jump|open|move)\b.*\b(?:to|page)\s*(\d+)\b/i, type: 'GO_TO', isLocal: true },
-    { pattern: /^page\s*(\d+)\b/i, type: 'GO_TO', isLocal: true },
+    // Next / Back navigation (with optional skip amount)
+    { pattern: /^(go to the next page|go to next page|go next|next|continue|skip forward|skip ahead|skip)\b(\s+(\d+))?/i, type: 'NEXT', isLocal: true, numberGroup: 3 },
+    { pattern: /^(go back|go to the previous page|go to previous page|back|previous|rewind)\b(\s+(\d+))?/i, type: 'BACK', isLocal: true, numberGroup: 3 },
 
-    // Start / read-aloud commands: "start teaching", "begin lesson", "read page 1"
-    { pattern: /^(?:read|start|begin)\b/i, type: 'START', isLocal: true },
+    // Mode switching
+    { pattern: /^(start|open|launch|switch to|go to|move to) (the )?(audio player|player|music player)\b/i, type: 'SWITCH_PLAYER', isLocal: true },
+    { pattern: /^(audio player mode|player mode|music mode)\b/i, type: 'SWITCH_PLAYER', isLocal: true },
+    { pattern: /^(start|open|launch|switch to|go to|move to) (the )?(ai )?teacher\b/i, type: 'SWITCH_TEACHER', isLocal: true },
+    { pattern: /^(ai teacher mode|teacher mode)\b/i, type: 'SWITCH_TEACHER', isLocal: true },
 
     // Resume commands
     { pattern: /^(resume|play)\b/i, type: 'RESUME', isLocal: true },
 
-    // Navigation commands
-    { pattern: /^(next|skip|forward|ahead|continue)\b(\s+(\d+))?/i, type: 'NEXT', isLocal: true },
-    { pattern: /^(back|previous|rewind|go back)\b(\s+(\d+))?/i, type: 'BACK', isLocal: true },
-
-    // Repeat commands
-    { pattern: /^(repeat|again|say that again|what did you say)\b/i, type: 'REPEAT', isLocal: true },
+    // Explicit "read / go to page N" jumps
+    { pattern: /^(?:read|open|go to|show)\s+(?:page\s+)?(\d+)\b/i, type: 'START_TEACHING', isLocal: true, pageGroup: 1 },
 
     // Summarize commands
     { pattern: /^(summarize|summary|summarise|recap)\b/i, type: 'SUMMARIZE', isLocal: true },
+
+    // Start teaching / confirm teaching
+    { pattern: /^(yes|yeah|yep|yup|okay|ok|sure|absolutely|correct|start|begin|go ahead|teach me|teach|explain|let'?s start|let us start|ready|read|go)\b/i, type: 'START_TEACHING', isLocal: true },
   ];
-
-  /**
-   * Extract command parameters from a matched command. Group indices depend on
-   * each pattern's capture groups (NEXT/BACK use group 3 for the amount;
-   * GO_TO uses group 1 for the target page; START scans the raw text for a
-   * page number like "read page 1").
-   */
-  private extractParameters(
-    type: VoiceCommandType,
-    match: RegExpMatchArray,
-    text: string
-  ): ParsedVoiceCommand['parameters'] | undefined {
-    switch (type) {
-      case 'NEXT':
-      case 'BACK': {
-        const amount = match[3] ? parseInt(match[3], 10) : undefined;
-        return amount ? { amount } : undefined;
-      }
-      case 'GO_TO': {
-        const target = match[1] ? parseInt(match[1], 10) : undefined;
-        return target ? { target } : undefined;
-      }
-      case 'START': {
-        const pageMatch = text.match(/(?:^|\W)(?:page|at|from)\s*(\d+)\b/);
-        if (pageMatch) {
-          return { target: parseInt(pageMatch[1], 10) };
-        }
-        return undefined;
-      }
-      default:
-        return undefined;
-    }
-  }
-
-  /**
-   * Check if device is online
-   */
-  async isOnline(): Promise<boolean> {
-    try {
-      const networkState = await Network.getNetworkStateAsync();
-      return !!networkState.isConnected && networkState.type !== Network.NetworkStateType.NONE;
-    } catch (error) {
-      console.error('[VoiceCommandParser] Network check failed:', error);
-      return false; // Assume offline if check fails
-    }
-  }
 
   /**
    * Parse voice command text
    */
   parseCommand(text: string): ParsedVoiceCommand {
     const trimmedText = text.trim().toLowerCase();
-    
+
     // Try to match against local command patterns
-    for (const { pattern, type, isLocal } of this.commandPatterns) {
+    for (const { pattern, type, isLocal, numberGroup, pageGroup } of this.commandPatterns) {
       const match = trimmedText.match(pattern);
       if (match) {
         const result: ParsedVoiceCommand = {
           type,
           isLocal,
-          requiresNetwork: false,
+          requiresNetwork: type === 'AI_QUERY',
           originalText: text,
         };
 
         // Extract parameters if present
-        const parameters = this.extractParameters(type, match, trimmedText);
-        if (parameters) {
-          result.parameters = parameters;
+        if (numberGroup && match[numberGroup]) {
+          result.parameters = { amount: parseInt(match[numberGroup], 10) };
+        } else if (pageGroup && match[pageGroup]) {
+          result.parameters = { pageNumber: parseInt(match[pageGroup], 10) };
         }
 
         console.log(`[VoiceCommandParser] Matched local command: ${type}`, result);
@@ -164,28 +132,15 @@ class VoiceCommandParserService {
   }
 
   /**
-   * Process voice command with network awareness
-   * Returns the action to take and any offline message if needed
+   * Process voice command. Always executable locally: navigation is offline by
+   * design and topic selection works against the offline catalog, while the AI
+   * query path has its own API-key fallback in the teacher engine.
    */
   async processCommand(text: string): Promise<{
     action: ParsedVoiceCommand;
-    offlineMessage?: string;
   }> {
-    const command = this.parseCommand(text);
-    const isOnline = await this.isOnline();
-
-    // If command requires network but we're offline
-    if (command.requiresNetwork && !isOnline) {
-      console.log('[VoiceCommandParser] AI query detected while offline');
-      return {
-        action: command,
-        offlineMessage: 'I am currently offline, but I can keep reading your document. I will answer your questions as soon as you reconnect.',
-      };
-    }
-
-    // Command can be executed
     return {
-      action: command,
+      action: this.parseCommand(text),
     };
   }
 

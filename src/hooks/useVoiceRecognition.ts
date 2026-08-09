@@ -10,17 +10,16 @@
  * - `startListening` is idempotent (no-op while already listening).
  * - While `keepAlive` is true the recognizer auto-restarts on end/error so a
  *   held push-to-talk press survives transient recognition resets.
+ * - `startListening(options)` registers an `onFinalResult` callback used by
+ *   the hands-free auto-listen loop; it is cleared again by `stopListening`.
  * - `stopListening` returns the latest recognized transcript (polled from the
  *   async onSpeechResults event that arrives after stop()).
- * - TTS completion can re-arm the mic via `recognitionBridge` (used while the
- *   onboarding prompt is finishing under a still-held press).
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Voice from '@react-native-voice/voice';
 import * as Speech from 'expo-speech';
-import { recognitionBridge } from '../services/recognitionBridge';
 import { playChime } from '../services/audioChime';
 
 export interface UseVoiceRecognitionReturn {
@@ -277,15 +276,6 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Re-arm the mic when TTS finishes while the user is still holding.
-  useEffect(() => {
-    return recognitionBridge.subscribe(() => {
-      if (keepAliveRef.current && !stopRequestedRef.current) {
-        void startListening();
-      }
-    });
-  }, [startListening]);
 
   /**
    * Stop listening for speech and return the latest recognized transcript.

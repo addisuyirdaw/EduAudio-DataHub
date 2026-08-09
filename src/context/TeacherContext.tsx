@@ -21,7 +21,7 @@ import { EducationalMetadata, dataHubService } from '../services/DataHubService'
 import { audioMutex } from './AudioMutex';
 import { voiceCommandParser, ParsedVoiceCommand } from '../services/voiceCommandParser.service';
 import { recognitionBridge } from '../services/recognitionBridge';
-import { modeBridge, ModeRequest } from '../services/modeBridge';
+import { modeBridge } from '../services/modeBridge';
 
 interface TeacherContextProviderProps {
   children: React.ReactNode;
@@ -37,6 +37,94 @@ const TTS_CONFIG: Speech.SpeechOptions = {
 
 const DEFAULT_LESSON_TITLE = 'Computer Science 101 - Intro to Data Structures';
 const DEFAULT_LESSON_ID = 'cs101-intro-data-structures';
+
+/**
+ * Module-level flag so the auto-speak greeting plays once per app session
+ * (the TeacherProvider remounts on every tab switch to AI Teacher).
+ */
+let autoGreetingPlayed = false;
+
+/**
+ * Conversational lesson content bank. The AI Teacher explains key concepts
+ * and pairs each with a practical, real-world analogy instead of reading raw
+ * text line-by-line — the requirement for blind accessibility.
+ */
+interface LessonEntry {
+  keywords: string[];
+  content: string;
+  analogy: string;
+}
+
+const LESSON_BANK: LessonEntry[] = [
+  {
+    keywords: ['introduction', 'data structures', 'intro'],
+    content:
+      'Data structures are ways of organizing data so a program can use it quickly and correctly. They are the building blocks of almost every program, because they decide how fast information can be stored, searched, and retrieved.',
+    analogy:
+      'Think of data structures like a well organized closet: the better your shelves and labels, the faster you find what you need.',
+  },
+  {
+    keywords: ['array', 'list', 'lists'],
+    content:
+      'An array stores items in a fixed, numbered sequence, like seats in a row. A list can grow and shrink as you add or remove items, like a guest list that keeps changing.',
+    analogy:
+      'An array is like a row of lockers, each with a number, so you can jump straight to locker five. A list is more like a paper guest list that you cross off and rewrite.',
+  },
+  {
+    keywords: ['stack', 'queue'],
+    content:
+      'A stack adds and removes items only from the top, like a stack of plates. A queue adds at the back and removes from the front, like a line at a ticket counter.',
+    analogy:
+      'A stack is plates in a cafeteria: the last plate placed is the first one used. A queue is a line at the store: first come, first served.',
+  },
+  {
+    keywords: ['tree', 'graph'],
+    content:
+      'A tree organizes data into levels with a single starting point, the root, branching into children. A graph connects items freely, so any item can link to any other, like a city map.',
+    analogy:
+      'A tree is like a family tree, parents branching to children. A graph is like a subway map, stations connected by many different lines.',
+  },
+  {
+    keywords: ['review', 'practice'],
+    content:
+      'In review, we pull everything together: choosing the right structure for the job, and practicing with small examples until each pattern feels natural.',
+    analogy:
+      'Review is like a musician running scales: repeating the basics slowly makes the hard pieces feel easy.',
+  },
+];
+
+function findLessonEntry(heading: string): LessonEntry {
+  const normalized = heading.toLowerCase();
+  const entry = LESSON_BANK.find((candidate) =>
+    candidate.keywords.some((keyword) => normalized.includes(keyword))
+  );
+  return (
+    entry ?? {
+      keywords: [],
+      content: `${heading} is explored step by step so you can follow along hands free, building understanding from the ground up.`,
+      analogy:
+        'Every new idea builds on what you already know, the same way climbing stairs lifts you higher one step at a time.',
+    }
+  );
+}
+
+/**
+ * Build the conversational teacher explanation for a page: states the topic,
+ * explains the key idea, offers a real-world analogy, and checks in with the
+ * student so they stay in control of the pace.
+ */
+function buildTeacherExplanation(doc: ParsedDocument, pageNumber: number): string {
+  const page = doc.pages[pageNumber - 1];
+  if (!page) return 'Sorry, that page is not available.';
+  const heading = page.headings?.[0]?.text ?? `Page ${pageNumber}`;
+  const entry = findLessonEntry(heading);
+  return (
+    `Let's talk about ${heading}. ` +
+    `${entry.content} ` +
+    `Think of it this way: ${entry.analogy} ` +
+    `Do you follow so far? Say 'next' to move on, 'repeat' to hear this again, or tell me a topic or question.`
+  );
+}
 
 /**
  * Build a complete lesson document so the AI Teacher always has real content
@@ -56,7 +144,7 @@ function buildLessonDocument(topicId: string, title: string, metadata: Education
         ];
 
   const pages: ParsedPage[] = headings.map((heading, index) => {
-    const text = buildPageText(heading.text);
+    const text = buildPageText(title, heading.text, index + 1);
     return {
       pageNumber: index + 1,
       text,
@@ -80,61 +168,9 @@ function buildLessonDocument(topicId: string, title: string, metadata: Education
   };
 }
 
-/**
- * Human-style, plain-language explanations used to build the default lesson
- * pages. Written the way a tutor would explain a concept out loud, so the
- * voice experience feels natural for a blind student following along hands
- * free.
- */
-const TOPIC_EXPLANATIONS: Record<string, string> = {
-  'Introduction to Data Structures':
-    'A data structure is a way of organizing and storing information in your computer so it can be used efficiently. Think of it like a well organized toolbox, where every tool has a clear place and purpose.',
-  'Arrays and Lists':
-    'An array stores many items of the same kind in a row, one after another. Each item has a position called an index, so finding any item is fast and simple.',
-  'Stacks and Queues':
-    'A stack is like a stack of plates, where you always take the top one first. A queue is like a line at the store, where the first person in line is served first.',
-  'Trees and Graphs':
-    'A tree organizes items in levels, like a family tree, with branches leading down from a single root. A graph lets items called nodes connect freely, like roads on a map.',
-  'Review and Practice':
-    'Now we bring everything together. Feel free to ask me to explain any topic again, or ask me any question about what we have covered.',
-};
-
-function buildPageText(heading: string): string {
-  const explanation =
-    TOPIC_EXPLANATIONS[heading] ?? TOPIC_EXPLANATIONS['Introduction to Data Structures'];
-  return `${heading}. ${explanation}`;
-}
-
-/**
- * The spoken options offered at the end of every page reading, so the student
- * always knows what they can say next. Kept short so it never overwhelms.
- */
-function buildPageAsk(): string {
-  return (
-    `Would you like to go to the next page, hear this page again, or go back to the previous page? ` +
-    `Say next to continue, say again to repeat, or say back for the previous page.`
-  );
-}
-
-/**
- * Full spoken narration for a page: announce the page, read the actual lesson
- * content out loud like a human tutor, then pause with a spoken prompt
- * offering next / repeat / back. The AI never advances to the next page on its
- * own - it always waits for the student to choose.
- */
-function buildPageNarration(pageText: string, page: number, totalPages: number): string {
-  return `Page ${page} of ${totalPages}. ${pageText} ${buildPageAsk()}`;
-}
-
-/**
- * Detect a mode-switch request ("player" / "teacher") in spoken or typed
- * command text. Word-boundary matching avoids matching inside other words.
- */
-function resolveModeSwitch(text: string): ModeRequest | null {
-  const cleanText = text.toLowerCase().trim();
-  if (/(?:^|\W)(?:player)(?:$|\W)/.test(cleanText)) return 'player';
-  if (/(?:^|\W)(?:teacher)(?:$|\W)/.test(cleanText)) return 'teacher';
-  return null;
+function buildPageText(title: string, heading: string, page: number): string {
+  const entry = findLessonEntry(heading);
+  return `${title}. ${heading}. ${entry.content} Ask me to repeat any part, or say "next" to continue.`;
 }
 
 /**
@@ -163,18 +199,14 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   const [audioMutexState, setAudioMutexState] = useState<AudioMutexState>(audioMutex.getState());
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [onboardingStep, setOnboardingStep] = useState(0);
+  const [pendingTeachPage, setPendingTeachPage] = useState<number | null>(null);
 
   // Refs for async operations
   const stateTransitionRef = useRef<TeacherState>('IDLE');
   const isTransitioningRef = useRef(false);
   const documentRef = useRef<ParsedDocument | null>(null);
   const stopReadingRef = useRef(false);
-  // Page number whose reading is already handled by an internal speaker
-  // (the startReading loop, loadDocument, onboarding, greeting). The
-  // auto-read effect skips that page and speaks any OTHER page change.
-  const handledPageRef = useRef(0);
-  // Last page that rendered, so the auto-read effect can detect real changes.
-  const prevPageRef = useRef(0);
+  const pendingTeachPageRef = useRef<number | null>(null);
 
   // Auto-load a default lesson document on mount so the AI Teacher always
   // renders "PAGE 1 OF X" + real lesson text immediately, even before the
@@ -188,46 +220,25 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     }
   }, []);
 
-  // Passive, student-led entry: no auto speech. Silently open the hands-free
-  // microphone so the student drives the lesson with their voice - "hello"
-  // for a warm greeting, "read page 1" to start the lesson, "summarize the
-  // chapter" for an overview, or "next" / "back" to navigate.
+  // Warm first impression: greet once per session and immediately enter
+  // listening mode. We do NOT auto-read the lesson — the student stays in
+  // control and explicitly asks before teaching begins. Re-entries (mode
+  // switches) confirm the switch and open the mic for commands.
   useEffect(() => {
-    void rearmAutoListen();
+    if (!autoGreetingPlayed) {
+      autoGreetingPlayed = true;
+      void startGreeting();
+    } else {
+      const doc = documentRef.current;
+      if (doc) {
+        transitionState('AI_SPEAKING');
+        void speakSilently(
+          'Switched to the AI Teacher. We are on page 1. What would you like to do? Say start to begin, or tell me a topic.'
+        ).then(() => rearmAutoListen());
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Auto-read lesson loop: whenever currentPage changes through a path that
-  // does NOT announce itself (e.g. voice NEXT/BACK navigation), stop any
-  // in-flight TTS, read the new page aloud with the short prompt, then
-  // re-arm the hands-free microphone. Pages already spoken by internal paths
-  // (startReading loop, loadDocument, onboarding, greeting) are skipped via
-  // handledPageRef.
-  useEffect(() => {
-    const prev = prevPageRef.current;
-    prevPageRef.current = currentPage;
-    if (currentPage < 1 || !documentRef.current) return;
-    if (prev === 0) return; // initial mount: greeting / onboarding owns page 1
-    if (handledPageRef.current === currentPage) {
-      handledPageRef.current = 0;
-      return;
-    }
-
-    const doc = documentRef.current;
-    console.log(`[TeacherContext] Page changed to ${currentPage}, auto-reading`);
-    const pageText = doc.pages[currentPage - 1]?.text ?? '';
-    void (async () => {
-      await audioMutex.hardPause();
-      if (stateTransitionRef.current !== 'ONBOARDING') {
-        transitionState('AI_SPEAKING');
-      }
-      await speakSilently(buildPageNarration(pageText, currentPage, doc.totalPages));
-      if (stateTransitionRef.current !== 'ONBOARDING') {
-        await rearmAutoListen();
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPage]);
 
   // Subscribe to audio mutex state changes
   useEffect(() => {
@@ -338,8 +349,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   /**
    * Warm spoken response to a friendly greeting ("hello", "hi", "hey").
    * Re-arms the mic afterwards so the student can immediately say what they
-   * want to do next. This replaces the old auto-greeting on mount: the engine
-   * is now passive and only speaks when the student speaks first.
+   * want to do next.
    */
   const respondToGreeting = useCallback(async () => {
     transitionState('AI_SPEAKING');
@@ -379,13 +389,107 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   }, [speakSilently, transitionState, rearmAutoListen]);
 
   /**
-   * Start Onboarding Flow
+   * Warm first impression: welcome the student, teach the navigation words,
+   * then hand over control. No lesson content is read automatically.
+   */
+  const startGreeting = useCallback(async () => {
+    const doc = documentRef.current;
+    if (!doc || doc.totalPages < 1) return;
+
+    setCurrentPage(1);
+    transitionState('AI_SPEAKING');
+    const greeting =
+      `Welcome to EduAudio! What subject would you like to learn today? ` +
+      `To navigate, you can say 'next' to go forward, 'previous' to go back, ` +
+      `'repeat' to hear this again, or tell me to switch modes.`;
+    await speakSilently(greeting);
+    await rearmAutoListen();
+  }, [speakSilently, transitionState, rearmAutoListen]);
+
+  /**
+   * Announce a page and ask for explicit confirmation before teaching it.
+   * Sets the pending-teach marker so the next confirmation ("yes", "go
+   * ahead", "explain") triggers the actual lesson speech.
+   */
+  const announcePage = useCallback(async (pageNumber: number): Promise<void> => {
+    const doc = documentRef.current;
+    if (!doc) {
+      await speakSilently('No document is loaded yet. Please tell me a topic first.');
+      transitionState('PAUSED');
+      await rearmAutoListen();
+      return;
+    }
+
+    const clamped = Math.max(1, Math.min(pageNumber, doc.totalPages));
+    const heading = doc.pages[clamped - 1]?.headings?.[0]?.text ?? `Page ${clamped}`;
+    setCurrentPage(clamped);
+    pendingTeachPageRef.current = clamped;
+    setPendingTeachPage(clamped);
+    transitionState('AI_SPEAKING');
+    await speakSilently(`Page ${clamped}: ${heading}. Ready for me to explain this section?`);
+    await rearmAutoListen();
+  }, [transitionState, speakSilently, rearmAutoListen]);
+
+  /**
+   * Deep conversational teaching of a single page: concept explanation plus a
+   * real-world analogy, then a check-in with the student. Clears the pending
+   * confirmation because the lesson has been explicitly approved.
+   */
+  const teachPage = useCallback(async (pageNumber: number): Promise<void> => {
+    const doc = documentRef.current;
+    if (!doc) {
+      await speakSilently('No document is loaded yet. Please tell me a topic first.');
+      transitionState('PAUSED');
+      await rearmAutoListen();
+      return;
+    }
+
+    const clamped = Math.max(1, Math.min(pageNumber, doc.totalPages));
+    setCurrentPage(clamped);
+    pendingTeachPageRef.current = null;
+    setPendingTeachPage(null);
+    transitionState('AI_SPEAKING');
+    await speakSilently(buildTeacherExplanation(doc, clamped));
+    await rearmAutoListen();
+  }, [transitionState, speakSilently, rearmAutoListen]);
+
+  /**
+   * Topic selection: the student named a subject with no heading match, so we
+   * build a lesson document for it and confirm before teaching.
+   */
+  const selectTopic = useCallback(async (topic: string): Promise<void> => {
+    const topicId = topic.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'topic';
+
+    let docMetadata: EducationalMetadata | null = null;
+    try {
+      docMetadata = await dataHubService.fetchMetadata(topicId);
+    } catch (e) {
+      console.warn('[TeacherContext] Metadata verification failed, using offline outline.', e);
+    }
+    setMetadata(docMetadata);
+
+    const lessonDoc = buildLessonDocument(topicId, topic, docMetadata);
+    documentRef.current = lessonDoc;
+    setDocument(lessonDoc);
+    setCurrentPage(1);
+    pendingTeachPageRef.current = 1;
+    setPendingTeachPage(1);
+    transitionState('AI_SPEAKING');
+    const heading = lessonDoc.pages[0]?.headings?.[0]?.text ?? lessonDoc.title;
+    await speakSilently(`Great! We are on Page 1: ${heading}. Should I begin explaining?`);
+    await rearmAutoListen();
+  }, [transitionState, speakSilently, rearmAutoListen]);
+
+  /**
+   * Start Onboarding Flow — single-step: ask the student for a subject, then
+   * route the answer through topic selection + confirmation.
    */
   const startOnboarding = useCallback(async () => {
     transitionState('ONBOARDING');
     setOnboardingStep(1);
     await speakSilently("Welcome to Edu Audio! What subject would you like to study today?");
-  }, [transitionState, speakSilently]);
+    await rearmAutoListen();
+  }, [transitionState, speakSilently, rearmAutoListen]);
 
   /**
    * Load a document and begin parsing
@@ -411,10 +515,8 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       }
 
       setCurrentPage(1);
-      handledPageRef.current = 1;
       transitionState('PAUSED');
       await speakSilently("Document loaded and verified. I'm ready when you are.");
-      handledPageRef.current = 0;
     } catch (error) {
       console.error('[TeacherContext] Document loading failed:', error);
       setErrorMessage(error instanceof Error ? error.message : 'Failed to load document');
@@ -434,32 +536,27 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       return;
     }
 
-    // Read exactly ONE page, then pause for the student. The lesson is
-    // student-paced: the AI never auto-advances to the next page on its own.
-    // It reads the page, offers next / repeat / back, and re-arms the mic so
-    // the student decides what happens next.
     stopReadingRef.current = false;
-    const page = Math.min(Math.max(range.startPage, 1), doc.totalPages);
-    const pageText = doc.pages[page - 1]?.text;
-    if (!pageText) {
-      transitionState('PAUSED');
-      return;
+    const endPage = Math.min(range.endPage, doc.totalPages);
+    let interrupted = false;
+    for (let page = range.startPage; page <= endPage; page++) {
+      const pageText = doc.pages[page - 1]?.text;
+      if (!pageText) break;
+      setCurrentPage(page);
+      await speakSilently(pageText);
+      if (stopReadingRef.current) {
+        stopReadingRef.current = false;
+        interrupted = true;
+        break;
+      }
     }
 
-    // Mark this page as handled so the auto-read effect does not announce it
-    // a second time, then speak the full narration (content + options).
-    handledPageRef.current = page;
-    setCurrentPage(page);
-    await speakSilently(buildPageNarration(pageText, page, doc.totalPages));
-    handledPageRef.current = 0;
-
-    // Speak-then-listen: after the page finishes, open the mic hands-free so
-    // the student can choose next, repeat, back, or ask a question.
-    if (!stopReadingRef.current) {
+    // Only fall back to PAUSED on natural completion; an interruption already
+    // moved the FSM to LISTENING (the fromState guard makes this safe).
+    if (!interrupted) {
       transitionState('PAUSED', 'AI_SPEAKING');
+      // Speak-then-listen: after the page finishes, open the mic hands-free.
       await rearmAutoListen();
-    } else {
-      stopReadingRef.current = false;
     }
   }, [transitionState, speakSilently, rearmAutoListen]);
 
@@ -475,8 +572,10 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       transitionState('PAUSED', 'AI_SPEAKING');
       return;
     }
-    await startReading({ startPage: Math.max(currentPage, 1), endPage: doc.totalPages, type: 'pages' });
-  }, [currentPage, startReading]);
+    // Re-confirm the current page before teaching, keeping the student in
+    // control of when the lesson speech actually starts.
+    await announcePage(Math.max(currentPage, 1));
+  }, [currentPage, announcePage]);
 
   const activateListening = useCallback(async (): Promise<void> => {
     transitionState('LISTENING');
@@ -549,6 +648,69 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
   }, [state, transitionState, startOnboarding]);
 
   /**
+   * Route a spoken topic or question. Topic names that match a document
+   * heading (or the lesson content bank) select that page and ask for
+   * confirmation; clear questions go to the LLM/fallback; anything else is
+   * treated as a new topic the student wants to study.
+   */
+  const handleTopicOrQuestion = useCallback(async (text: string): Promise<void> => {
+    const doc = documentRef.current;
+    const lower = text.trim().toLowerCase();
+
+    if (doc) {
+      const matchIndex = doc.pages.findIndex((page) => {
+        const heading = page.headings?.[0]?.text ?? '';
+        const entry = heading ? findLessonEntry(heading) : null;
+        return (
+          (heading && lower.includes(heading.toLowerCase())) ||
+          (entry?.keywords.some((keyword) => lower.includes(keyword)) ?? false)
+        );
+      });
+
+      if (matchIndex >= 0) {
+        const target = matchIndex + 1;
+        const heading = doc.pages[matchIndex]?.headings?.[0]?.text ?? `Page ${target}`;
+        setCurrentPage(target);
+        pendingTeachPageRef.current = target;
+        setPendingTeachPage(target);
+        transitionState('AI_SPEAKING');
+        await speakSilently(`Great! We are on Page ${target}: ${heading}. Should I begin explaining?`);
+        await rearmAutoListen();
+        return;
+      }
+    }
+
+    const isQuestion =
+      /\?\s*$/.test(lower) ||
+      /^(what|why|how|when|where|who|which)\b/.test(lower) ||
+      /^(tell me|explain (why|how|what)|define|describe)\b/.test(lower);
+
+    if (isQuestion) {
+      await askQuestion(text);
+      return;
+    }
+
+    await selectTopic(text);
+  }, [transitionState, speakSilently, rearmAutoListen, askQuestion, selectTopic]);
+
+  /**
+   * Voice-driven mode switching. Switching to the Audio Player hands the
+   * request to the top-level mode bridge: App swaps the screens and speaks
+   * the confirmation. Switching to the AI Teacher while already here just
+   * confirms the current mode (App's own bridge early-returns on a same-mode
+   * request, so the confirmation lives here).
+   */
+  const switchMode = useCallback(async (target: 'player' | 'teacher'): Promise<void> => {
+    if (target === 'player') {
+      modeBridge.requestMode('player');
+      return;
+    }
+    await speakSilently('You are already in the AI Teacher. What would you like to do?');
+    transitionState('PAUSED');
+    await rearmAutoListen();
+  }, [speakSilently, transitionState, rearmAutoListen]);
+
+  /**
    * Process a typed or recognized text command (non-onboarding routing).
    * Shared by the voice LISTENING path and the fallback text input.
    */
@@ -562,27 +724,11 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       return;
     }
 
-    // Mode-switch commands (spoken or typed): hand off to the top-level mode
-    // bridge, which swaps screens, isolates audio, and speaks the new mode.
-    const modeRequest = resolveModeSwitch(trimmed);
-    if (modeRequest) {
-      await audioMutex.hardPause();
-      modeBridge.requestMode(modeRequest);
-      return;
-    }
-
-    const { action, offlineMessage } = await voiceCommandParser.processCommand(trimmed);
-
-    if (offlineMessage) {
-      await speakSilently(offlineMessage);
-      transitionState('PAUSED');
-      await rearmAutoListen();
-      return;
-    }
+    const { action } = await voiceCommandParser.processCommand(trimmed);
 
     // Route commands
     if (action.type === 'AI_QUERY') {
-      await askQuestion(text);
+      await handleTopicOrQuestion(text);
       return;
     }
 
@@ -590,105 +736,79 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     const page = currentPage;
 
     switch (action.type) {
-      case 'START': {
-        // "read page 1", "start teaching", "begin lesson": read exactly one
-        // page aloud (student-paced), then pause for the student's choice.
-        const target = typeof action.parameters?.target === 'number' ? action.parameters.target : 1;
-        if (doc) {
-          await startReading({ startPage: target, endPage: doc.totalPages, type: 'pages' });
+      case 'START_TEACHING': {
+        const explicitPage = action.parameters?.pageNumber;
+        if (pendingTeachPageRef.current != null) {
+          // Student confirmed the announced page -> teach it now.
+          await teachPage(pendingTeachPageRef.current);
+        } else if (explicitPage != null) {
+          await announcePage(explicitPage);
         } else {
-          await speakSilently("No lesson is loaded yet. Say summarize the chapter to hear what's available.");
-          transitionState('PAUSED');
-          await rearmAutoListen();
+          await announcePage(page >= 1 ? page : 1);
         }
         break;
       }
-      case 'GO_TO': {
-        // "go to page 2", "page 5": page change only - the auto-read currentPage
-        // effect stops any in-flight TTS, reads the new page aloud, and re-arms.
-        const target = typeof action.parameters?.target === 'number' ? action.parameters.target : 0;
-        if (!doc) {
-          await speakSilently("No lesson is loaded yet. Say start teaching to begin.");
-          transitionState('PAUSED');
-          await rearmAutoListen();
-        } else if (target < 1 || target > doc.totalPages) {
-          await speakSilently(`I could not find page ${target}. This lesson has ${doc.totalPages} pages.`);
-          transitionState('PAUSED');
-          await rearmAutoListen();
-        } else if (target === page) {
-          await speakSilently(`We are already on page ${target}.`);
-          transitionState('PAUSED');
-          await rearmAutoListen();
-        } else {
-          setCurrentPage(target);
-          transitionState('PAUSED');
-        }
-        break;
-      }
-      case 'SUMMARIZE':
-        await summarizeChapter();
-        break;
-      case 'RESUME':
-        if (doc && page >= 1) {
-          await startReading({ startPage: page, endPage: doc.totalPages, type: 'pages' });
-        } else {
-          transitionState('PAUSED');
-          await rearmAutoListen();
-        }
-        break;
       case 'NEXT':
         if (doc && page < doc.totalPages) {
-          // Page change only: the auto-read currentPage effect stops any
-          // in-flight TTS, reads the new page aloud, and re-arms the mic.
-          setCurrentPage(page + 1);
-          transitionState('PAUSED');
+          const amount = action.parameters?.amount ?? 1;
+          await announcePage(page + amount);
         } else {
-          await speakSilently('You are already at the end of the document. Say back for the previous page.');
+          await speakSilently('You are already at the end of the document.');
           transitionState('PAUSED');
           await rearmAutoListen();
         }
         break;
       case 'BACK':
         if (doc && page > 1) {
-          setCurrentPage(page - 1);
-          transitionState('PAUSED');
+          const amount = action.parameters?.amount ?? 1;
+          await announcePage(page - amount);
         } else {
-          await speakSilently('You are already at the start of the document. Say next to continue.');
+          await speakSilently('You are already at the start of the document.');
           transitionState('PAUSED');
           await rearmAutoListen();
         }
         break;
       case 'REPEAT':
-        if (doc && page >= 1 && doc.pages[page - 1]?.text) {
-          await speakSilently(buildPageNarration(doc.pages[page - 1].text, page, doc.totalPages));
+        if (doc && page >= 1 && doc.pages[page - 1]) {
+          await teachPage(page);
         } else {
-          await speakSilently("There is no content to repeat yet. Say next to continue.");
+          await speakSilently('There is no content to repeat yet.');
+          transitionState('PAUSED');
+          await rearmAutoListen();
         }
-        transitionState('PAUSED');
-        await rearmAutoListen();
+        break;
+      case 'SUMMARIZE':
+        await summarizeChapter();
+        break;
+      case 'RESUME':
+        if (doc && page >= 1) {
+          await announcePage(page);
+        } else {
+          transitionState('PAUSED');
+          await rearmAutoListen();
+        }
+        break;
+      case 'SWITCH_PLAYER':
+        await switchMode('player');
+        break;
+      case 'SWITCH_TEACHER':
+        await switchMode('teacher');
         break;
       case 'PAUSE':
       case 'STOP':
-        // A blind student may want to stop the reading and immediately ask a
-        // question. Stop any in-flight TTS, then re-arm the mic so their next
-        // words (e.g. a question) are heard.
-        stopReadingRef.current = true;
-        await Speech.stop();
-        await audioMutex.releaseTTSLock();
         transitionState('PAUSED');
-        await rearmAutoListen();
         break;
       case 'UNKNOWN':
       default:
-        await speakSilently("I didn't catch that. Say 'read page one' to start, 'next' to continue, 'again' to repeat, or 'summarize' for an overview.");
+        await speakSilently("I didn't catch that. Say 'next' to move forward, 'back' to go back, 'repeat' to hear this again, or tell me a topic to begin.");
         transitionState('PAUSED');
         await rearmAutoListen();
         break;
     }
-  }, [currentPage, transitionState, speakSilently, askQuestion, startReading, rearmAutoListen, respondToGreeting, summarizeChapter]);
+  }, [currentPage, transitionState, speakSilently, teachPage, announcePage, summarizeChapter, respondToGreeting, handleTopicOrQuestion, switchMode, rearmAutoListen]);
 
   /**
-   * Process onboarding input (Subject -> Unit -> Topic).
+   * Process onboarding input — single-step topic selection.
    */
   const processOnboardingText = useCallback(async (text: string): Promise<void> => {
     if (!text.trim()) {
@@ -696,40 +816,11 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       await rearmAutoListen();
       return;
     }
-
-    if (onboardingStep === 1) {
-      setOnboardingStep(2);
-      await speakSilently(`Got it! Studying ${text} today. Which unit or chapter are we working on?`);
-      await rearmAutoListen();
-    } else if (onboardingStep === 2) {
-      setOnboardingStep(3);
-      await speakSilently(`Okay, chapter ${text}. Which specific topic should we cover?`);
-      await rearmAutoListen();
-    } else if (onboardingStep === 3) {
-      setOnboardingStep(0);
-      transitionState('THINKING');
-      await speakSilently("One moment while I fetch the lesson metadata and verify the content.");
-
-      // Fetch Metadata & Verify
-      const topicId = text.toLowerCase().replace(/\s+/g, '-');
-      let docMetadata: EducationalMetadata | null = null;
-      try {
-        docMetadata = await dataHubService.fetchMetadata(topicId);
-      } catch (e) {
-        console.warn("Metadata verification failed, using offline outline.", e);
-      }
-      setMetadata(docMetadata);
-
-      const lessonDoc = buildLessonDocument(topicId, text, docMetadata);
-      documentRef.current = lessonDoc;
-      setDocument(lessonDoc);
-      handledPageRef.current = 1;
-      setCurrentPage(1);
-      transitionState('AI_SPEAKING');
-      await speakSilently(`Verified. I've loaded the outline for ${lessonDoc.title}. Starting lesson now.`);
-      await startReading({ startPage: 1, endPage: lessonDoc.totalPages, type: 'pages' });
-    }
-  }, [onboardingStep, transitionState, speakSilently, startReading, rearmAutoListen]);
+    setOnboardingStep(0);
+    transitionState('THINKING');
+    await speakSilently('One moment while I prepare that subject.');
+    await selectTopic(text.trim());
+  }, [transitionState, speakSilently, selectTopic, rearmAutoListen]);
 
   /**
    * Handle touch up - Main voice logic
@@ -779,6 +870,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
     document,
     metadata,
     currentPage,
+    pendingTeachPage,
     playbackPosition,
     conversationHistory,
     interruptionContext,

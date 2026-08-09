@@ -61,9 +61,9 @@ export default function App() {
 
   /**
    * Spoken confirmation of a mode change: "Switched to [Audio Player / AI
-   * Teacher]. How can I help?" Resolves only when the announcement finishes
-   * speaking (or is interrupted / errors), so callers can order the screen
-   * swap relative to the speech.
+   * Teacher]. What would you like to do?" Resolves only when the announcement
+   * finishes speaking (or is interrupted / errors), so callers can order the
+   * screen swap relative to the speech.
    */
   const announceMode = useCallback(async (nextMode: Mode): Promise<void> => {
     const label = nextMode === 'player' ? 'Audio Player' : 'AI Teacher';
@@ -82,7 +82,7 @@ export default function App() {
         settle();
       }, 10000);
       try {
-        Speech.speak(`Switched to ${label}. How can I help?`, {
+        Speech.speak(`Switched to ${label}. What would you like to do?`, {
           language: 'en-US',
           rate: 0.95,
           onDone: settle,
@@ -102,17 +102,14 @@ export default function App() {
   /**
    * Audio isolation on tab switch: stop any in-flight TTS / mutex-tracked
    * playback before the screen swap, then announce the new mode out loud.
-   * When entering the AI Teacher - which mounts silently and immediately opens
-   * the mic, whose start handler silences TTS - the confirmation is spoken
-   * BEFORE the swap so the mic never cuts it off. The Audio Player has no mic,
-   * so its announcement can safely play after the swap.
+   * The Audio Player has no mic, so its announcement plays after the swap.
+   * When entering the AI Teacher, the TeacherProvider announces its own
+   * re-entry greeting on mount, so App stays silent for that direction to
+   * avoid double announcements.
    */
   const switchMode = useCallback(async (nextMode: Mode): Promise<void> => {
     if (modeRef.current === nextMode) return;
     await audioMutex.hardPause();
-    if (nextMode === 'teacher') {
-      await announceMode(nextMode);
-    }
     modeRef.current = nextMode;
     setMode(nextMode);
     if (nextMode === 'player') {
@@ -139,8 +136,9 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [switchMode]);
 
-  // Voice / command mode-switch requests (e.g. saying "player" to the AI
-  // Teacher) are routed up from the teacher's live keyword matcher.
+  // Voice / command mode-switch requests (e.g. saying "switch to the audio
+  // player" to the AI Teacher) are routed up from the teacher's command
+  // router and live keyword matcher.
   useEffect(() => {
     return modeBridge.subscribe((requested) => {
       void switchMode(requested);
@@ -150,8 +148,8 @@ export default function App() {
   /**
    * Spacebar / M on the AUDIO PLAYER tab: switch to the AI Teacher through the
    * shared switchMode path (audio isolation + spoken confirmation). The
-   * teacher then mounts silently and opens the hands-free mic for the student
-   * to speak.
+   * teacher then mounts and announces its own re-entry greeting before
+   * opening the hands-free mic for the student to speak.
    */
   useKeyboardPTT(
     () => {

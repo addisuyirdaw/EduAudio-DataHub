@@ -27,6 +27,7 @@ export interface UseAITeacherReturn {
   currentDocument: any;
   metadata: any;
   currentPage: number;
+  pendingTeachPage: number | null;
   statusMessage: string;
   recognizedText: string;
   onboardingStep: number;
@@ -67,15 +68,19 @@ export function useAITeacher(): UseAITeacherReturn {
 
   /**
    * Hands-free capture: a recognized final transcript arrives straight from
-   * the recognizer (no push-to-talk press), gets routed through the same FSM
-   * pipeline as a spoken PTT command, and the loop re-arms on the response.
+   * the recognizer (no push-to-talk press). The mic is ALWAYS closed before
+   * the teacher speaks — otherwise the AI's own voice could be re-captured as
+   * a phantom command — then the command routes through the same FSM pipeline
+   * as a spoken PTT command, and the loop re-arms on the response.
    */
   const handleAutoCapture = useCallback(async (text: string) => {
     if (!autoListenRef.current) return;
     autoListenRef.current = false;
     try {
-      const captured = text || (await voiceRecognition.stopListening());
-      await context.handleTouchUp(captured || '');
+      // Close the mic (returns the latest transcript) before routing so the
+      // response speech is never captured back into the recognizer.
+      const spoken = await voiceRecognition.stopListening();
+      await context.handleTouchUp(text || spoken || '');
     } catch (error) {
       console.error('[useAITeacher] Auto capture error:', error);
     }
@@ -137,22 +142,30 @@ export function useAITeacher(): UseAITeacherReturn {
         setStatusMessage(`Onboarding Step ${context.onboardingStep}`);
         break;
       case 'AI_SPEAKING':
-        setStatusMessage(`Reading page ${context.currentPage}`);
+        setStatusMessage(
+          context.pendingTeachPage != null
+            ? `Awaiting confirmation before explaining page ${context.pendingTeachPage}`
+            : `Teaching page ${context.currentPage}`
+        );
         break;
       case 'LISTENING':
-        setStatusMessage('Listening...');
+        setStatusMessage(
+          context.pendingTeachPage != null
+            ? `Listening... say yes to begin page ${context.pendingTeachPage}`
+            : 'Listening...'
+        );
         break;
       case 'THINKING':
         setStatusMessage('Processing...');
         break;
       case 'PAUSED':
-        setStatusMessage('Paused. Tap to continue');
+        setStatusMessage('Paused. Say a command or topic to continue');
         break;
       case 'ERROR':
         setStatusMessage('An error occurred');
         break;
     }
-  }, [context.state, context.onboardingStep, context.currentPage]);
+  }, [context.state, context.onboardingStep, context.currentPage, context.pendingTeachPage]);
 
   /**
    * Handle touch down - activate voice recognition or start onboarding
@@ -202,6 +215,7 @@ export function useAITeacher(): UseAITeacherReturn {
     currentDocument: context.document,
     metadata: context.metadata,
     currentPage: context.currentPage,
+    pendingTeachPage: context.pendingTeachPage,
     onboardingStep: context.onboardingStep,
     statusMessage,
     recognizedText: voiceRecognition.recognizedText,

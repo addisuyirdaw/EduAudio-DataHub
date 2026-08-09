@@ -154,6 +154,7 @@ export interface TeacherContext {
   document: ParsedDocument | null;
   metadata: EducationalMetadata | null;
   currentPage: number;
+  pendingTeachPage: number | null;
   playbackPosition: number;
   conversationHistory: ConversationMessage[];
   interruptionContext: InterruptionContext | null;
