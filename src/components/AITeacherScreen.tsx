@@ -27,6 +27,7 @@ const AITeacherContent: React.FC = () => {
     state,
     statusMessage,
     recognizedText,
+    voiceError,
     handleTouchDown,
     handleTouchUp,
     submitTextCommand,
@@ -57,6 +58,11 @@ const AITeacherContent: React.FC = () => {
       <ActiveParagraphDisplay />
       
       {/* Fallback text command input (speech-recognition-restricted browsers) */}
+      {voiceError && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorBannerText}>{voiceError}</Text>
+        </View>
+      )}
       <View style={styles.commandInputContainer}>
         <TextInput
           style={styles.commandInput}
@@ -117,6 +123,21 @@ const styles = StyleSheet.create({
     // Keep the input above the full-bleed PTT overlay so it stays tappable.
     zIndex: 10,
     elevation: 10,
+  },
+  errorBanner: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    zIndex: 10,
+    elevation: 10,
+  },
+  errorBannerText: {
+    color: Colors.onPrimary,
+    backgroundColor: Colors.aiActive,
+    borderRadius: 8,
+    overflow: 'hidden',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    fontSize: Typography.size.md,
   },
   commandInput: {
     backgroundColor: Colors.surface,

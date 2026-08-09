@@ -32,6 +32,7 @@ export interface UseAITeacherReturn {
   statusMessage: string;
   recognizedText: string;
   onboardingStep: number;
+  voiceError: string | null;
 
   // Actions
   loadDocument: (uri: string) => Promise<void>;
@@ -238,6 +239,7 @@ export function useAITeacher(): UseAITeacherReturn {
     onboardingStep: context.onboardingStep,
     statusMessage,
     recognizedText: voiceRecognition.recognizedText,
+    voiceError: voiceRecognition.error,
     
     loadDocument: context.loadDocument,
     startReading: context.startReading,

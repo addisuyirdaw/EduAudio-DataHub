@@ -15,7 +15,9 @@
  * - `onend` / `onerror` auto-restart while `keepAlive` is true (debounced so
  *   Chrome doesn't throw InvalidStateError from a synchronous start()), so a
  *   held push-to-talk press survives transient recognition resets and the
- *   microphone never freezes.
+ *   microphone never freezes. A `network` error backs off exponentially
+ *   (5s → 30s) so Google's speech servers are not rate-limited in a tight
+ *   loop.
  * - Auto-restarts keep the session callbacks: re-arming the recognizer via a
  *   `startListening()` call without options preserves the armed `onFinalResult`
  *   and `onLiveCommand` instead of clearing them.
@@ -131,6 +133,14 @@ function getRecognition(): SpeechRecognitionLike | null {
 const RESTART_DELAY_MS = 200;
 
 /**
+ * Backoff before retrying speech recognition after a 'network' error. Google's
+ * speech servers rate-limit browsers that restart in a tight loop, so the first
+ * retry waits 5s and each consecutive failure doubles the delay up to the cap.
+ */
+const NETWORK_BACKOFF_INITIAL_MS = 5000;
+const NETWORK_BACKOFF_MAX_MS = 30000;
+
+/**
  * Short grace period after the mic opens during which non-command audio is
  * dropped in case the AI's own TTS is still audibly trailing off. Live
  * command keywords bypass this entirely, and the grace never depends on
@@ -157,6 +167,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const micOpenedAtRef = useRef(0);
   const ttsActiveAtMicOpenRef = useRef(false);
+  const networkBackoffMsRef = useRef(0);
 
   const startListening = useCallback(async (options?: StartListeningOptions) => {
     const recognition = recognitionRef.current;
@@ -220,7 +231,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     );
   }, []);
 
-  const scheduleRestart = useCallback(() => {
+  const scheduleRestart = useCallback((delay: number = RESTART_DELAY_MS) => {
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;
@@ -231,7 +242,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
         console.log('[VoiceRecognition.web] Auto-restarting recognition after end/error');
         void startListening();
       }
-    }, RESTART_DELAY_MS);
+    }, delay);
   }, [startListening]);
 
   // Setup speech recognition on mount
@@ -254,6 +265,8 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setIsRecognizing(true);
       setError(null);
       console.log('[VoiceRecognition.web] Speech recognition started');
+      // A session actually started: the network recovered, reset the backoff.
+      networkBackoffMsRef.current = 0;
       // Mic is live: immediately silence any TTS output so the mic is never
       // blocked by audio the AI is currently reading aloud.
       try {
@@ -369,8 +382,24 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setIsRecognizing(false);
       activeRef.current = false;
       const errorCode = String(event?.error ?? 'unknown');
-      setError(errorCode);
       console.error('[VoiceRecognition.web] Speech recognition error:', event);
+
+      // 'network' means Google's speech servers could not be reached or
+      // rate-limited the browser. Restarting immediately only makes it worse,
+      // so back off exponentially instead of hammering the servers.
+      if (errorCode === 'network') {
+        networkBackoffMsRef.current =
+          networkBackoffMsRef.current === 0
+            ? NETWORK_BACKOFF_INITIAL_MS
+            : Math.min(networkBackoffMsRef.current * 2, NETWORK_BACKOFF_MAX_MS);
+        setError('Voice service is unreachable. You can still type commands below.');
+        console.warn(
+          `[VoiceRecognition.web] Network error; retrying in ${networkBackoffMsRef.current}ms`
+        );
+        scheduleRestart(networkBackoffMsRef.current);
+        return;
+      }
+
       if (isFatalError(errorCode)) {
         keepAliveRef.current = false;
         stopRequestedRef.current = true;
@@ -388,8 +417,11 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       // (not a deliberate stop) restart the recognizer so the mic never
       // freezes between sessions. The restart is debounced because Chrome
       // throws InvalidStateError if start() is called synchronously from
-      // inside onend.
-      scheduleRestart();
+      // inside onend. A restart already scheduled by onerror (e.g. the network
+      // backoff) is left untouched so its delay is not overwritten.
+      if (!restartTimerRef.current) {
+        scheduleRestart();
+      }
     };
 
     return () => {
