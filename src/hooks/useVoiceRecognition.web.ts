@@ -16,6 +16,9 @@
  *   Chrome doesn't throw InvalidStateError from a synchronous start()), so a
  *   held push-to-talk press survives transient recognition resets and the
  *   microphone never freezes.
+ * - Auto-restarts keep the session callbacks: re-arming the recognizer via a
+ *   `startListening()` call without options preserves the armed `onFinalResult`
+ *   and `onLiveCommand` instead of clearing them.
  * - `startListening(options)` registers an `onFinalResult` callback used by
  *   the hands-free auto-listen loop; it is cleared again by `stopListening`.
  * - `stopListening` returns the latest recognized transcript.
@@ -163,8 +166,14 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
     }
     if (activeRef.current) return;
 
-    finalResultRef.current = options?.onFinalResult ?? null;
-    liveCommandRef.current = options?.onLiveCommand ?? null;
+    // Auto-restart (from onend/onerror) and retry-after-start-failure call
+    // startListening() without options. Preserve the session's callbacks in
+    // that case — otherwise the first restart wipes the live-command handler
+    // and every keyword heard afterwards is displayed but never routed.
+    if (options) {
+      finalResultRef.current = options.onFinalResult ?? null;
+      liveCommandRef.current = options.onLiveCommand ?? null;
+    }
 
     try {
       setError(null);

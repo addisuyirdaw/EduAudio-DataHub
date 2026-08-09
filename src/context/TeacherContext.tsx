@@ -775,7 +775,9 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       case 'NEXT':
         if (doc && page < doc.totalPages) {
           const amount = action.parameters?.amount ?? 1;
-          await announcePage(page + amount);
+          // Advance AND teach: "next" moves to the next page and reads it
+          // right away, so the student never needs a separate confirmation.
+          await teachPage(page + amount);
         } else {
           await speakSilently('You are already at the end of the document.');
           transitionState('PAUSED');
@@ -785,7 +787,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
       case 'BACK':
         if (doc && page > 1) {
           const amount = action.parameters?.amount ?? 1;
-          await announcePage(page - amount);
+          await teachPage(page - amount);
         } else {
           await speakSilently('You are already at the start of the document.');
           transitionState('PAUSED');
@@ -829,7 +831,7 @@ export const TeacherProvider: React.FC<TeacherContextProviderProps> = ({ childre
         await rearmAutoListen();
         break;
     }
-  }, [currentPage, transitionState, speakSilently, teachPage, announcePage, summarizeChapter, respondToGreeting, handleTopicOrQuestion, switchMode, rearmAutoListen]);
+  }, [currentPage, transitionState, speakSilently, teachPage, summarizeChapter, respondToGreeting, handleTopicOrQuestion, switchMode, rearmAutoListen]);
 
   /**
    * Process onboarding input — single-step topic selection.
