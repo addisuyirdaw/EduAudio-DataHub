@@ -12,17 +12,18 @@
  * - `startListening` is idempotent (no-op while already listening).
  * - `onresult` captures both interim and final transcripts, so text keeps
  *   flowing even while the lesson document is initializing.
- * - `onend` restarts the recognizer immediately (and `onerror` after a short
- *   delay) while `keepAlive` is true, so a held push-to-talk press survives
- *   transient recognition resets and the microphone never freezes.
+ * - `onend` / `onerror` auto-restart while `keepAlive` is true (debounced so
+ *   Chrome doesn't throw InvalidStateError from a synchronous start()), so a
+ *   held push-to-talk press survives transient recognition resets and the
+ *   microphone never freezes.
  * - `startListening(options)` registers an `onFinalResult` callback used by
  *   the hands-free auto-listen loop; it is cleared again by `stopListening`.
  * - `stopListening` returns the latest recognized transcript.
- * - Every result is gated by a bounded TTS echo guard: input is dropped only
- *   while the AI is actually speaking out loud, and a stuck
+ * - Live command keywords fire instantly the moment they are heard. Other
+ *   (non-command) input passes a short mic-open echo grace, so a stuck
  *   `Speech.isSpeakingAsync()` (seen on some web browsers) can never block
- *   the mic, so the AI's own TTS output is never re-routed as a phantom
- *   command while real student speech still gets through.
+ *   the mic — real student speech always gets through while the AI's own TTS
+ *   output is still not re-routed as a phantom command.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -127,13 +128,12 @@ function getRecognition(): SpeechRecognitionLike | null {
 const RESTART_DELAY_MS = 200;
 
 /**
- * How long the `onresult` echo guard waits for the AI's own TTS to finish
- * before processing captured input anyway. Some web browsers leave
- * `Speech.isSpeakingAsync()` stuck at true after the utterance ends; this
- * bound guarantees the microphone unmutes shortly after speaking finishes
- * instead of blocking voice commands forever.
+ * Short grace period after the mic opens during which non-command audio is
+ * dropped in case the AI's own TTS is still audibly trailing off. Live
+ * command keywords bypass this entirely, and the grace never depends on
+ * `Speech.isSpeakingAsync()` (which some web browsers leave stuck at true).
  */
-const TTS_UNBLOCK_MS = 1000;
+const MIC_OPEN_ECHO_GRACE_MS = 400;
 
 /**
  * Hook for voice recognition functionality (web build).
@@ -152,6 +152,8 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const finalResultRef = useRef<((text: string) => void) | null>(null);
   const liveCommandRef = useRef<((command: LiveVoiceCommand, transcript: string) => void) | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const micOpenedAtRef = useRef(0);
+  const ttsActiveAtMicOpenRef = useRef(false);
 
   const startListening = useCallback(async (options?: StartListeningOptions) => {
     const recognition = recognitionRef.current;
@@ -182,6 +184,15 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setIsRecognizing(false);
       setError(startError instanceof Error ? startError.message : 'Failed to start listening');
       console.error('[VoiceRecognition.web] Start listening error:', startError);
+      // A transient start failure (e.g. restarting too quickly right after
+      // onend) must not kill the session: retry while keepAlive is requested.
+      if (keepAliveRef.current && !stopRequestedRef.current) {
+        setTimeout(() => {
+          if (keepAliveRef.current && !stopRequestedRef.current) {
+            void startListening();
+          }
+        }, RESTART_DELAY_MS);
+      }
     }
   }, []);
 
@@ -241,6 +252,17 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       } catch {
         // ignore
       }
+      // Record when the mic opened and whether TTS was still reported as
+      // speaking at that instant. This only feeds the short echo grace below;
+      // a stuck isSpeakingAsync() can never block commands past that grace.
+      micOpenedAtRef.current = Date.now();
+      void Speech.isSpeakingAsync()
+        .then((speaking) => {
+          ttsActiveAtMicOpenRef.current = speaking;
+        })
+        .catch(() => {
+          ttsActiveAtMicOpenRef.current = false;
+        });
       playChime('start');
     };
 
@@ -269,53 +291,57 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       // soon as the student speaks, before any async gating runs.
       setRecognizedText(cleanText);
 
+      // Real-time keyword evaluation: live navigation keywords fire instantly
+      // (no echo guard, no isSpeakingAsync dependence) so the page moves the
+      // moment the student says the word.
+      const liveCommand = resolveLiveCommand(cleanText);
+
+      if (liveCommand && !stopRequestedRef.current) {
+        // Consume the command now: prevent re-firing on later result events.
+        stopRequestedRef.current = true;
+        keepAliveRef.current = false;
+        const handler = liveCommandRef.current;
+        liveCommandRef.current = null;
+        finalResultRef.current = null;
+        // Clear the transcript immediately so the overlay never stays
+        // stuck showing the consumed command while the page navigates.
+        setRecognizedText('');
+
+        console.log(
+          `[VoiceRecognition.web] Live command matched: ${liveCommand} ("${cleanText}")`
+        );
+        if (handler) {
+          void (async () => {
+            const text = await stopListening();
+            latestResultRef.current = '';
+            handler(liveCommand, text || cleanText);
+          })();
+        } else {
+          void stopListening();
+        }
+        return;
+      }
+
       void (async () => {
         try {
-          // Echo guard with a stuck-TTS fallback: while the AI's own TTS is
-          // still playing, audio in the mic is its echo — wait (bounded) for
-          // speech to finish so a command heard right as TTS ends is never
-          // dropped. Some web browsers leave isSpeakingAsync() stuck at true
-          // after the utterance ends; the bound guarantees the mic unmutes
-          // shortly after speaking finishes instead of blocking forever.
-          const ttsWaitDeadline = Date.now() + TTS_UNBLOCK_MS;
-          while (Date.now() < ttsWaitDeadline && (await Speech.isSpeakingAsync())) {
-            await new Promise((resolve) => setTimeout(resolve, 50));
+          // Echo guard for non-command input: drop audio only in the short
+          // window right after the mic opened (possible TTS echo), and only
+          // if TTS was still reported as speaking then. This never blocks on
+          // a stuck `Speech.isSpeakingAsync()` — once the grace elapses every
+          // transcript is processed.
+          if (
+            ttsActiveAtMicOpenRef.current &&
+            Date.now() - micOpenedAtRef.current < MIC_OPEN_ECHO_GRACE_MS
+          ) {
+            console.log(
+              `[VoiceRecognition.web] Ignoring non-command transcript "${cleanText}" during mic-open echo grace`
+            );
+            return;
           }
 
           latestResultRef.current = cleanText;
           // Blind accessibility: expose the live transcript immediately.
           console.log('STT Captured:', cleanText);
-
-          // Real-time keyword evaluation: test the live transcript on every
-          // speech event (interim AND final) so page navigation doesn't wait
-          // for the speech session to end.
-          const liveCommand = resolveLiveCommand(cleanText);
-
-          if (liveCommand && !stopRequestedRef.current) {
-            // Consume the command now: prevent re-firing on later result events.
-            stopRequestedRef.current = true;
-            keepAliveRef.current = false;
-            const handler = liveCommandRef.current;
-            liveCommandRef.current = null;
-            finalResultRef.current = null;
-            // Clear the transcript immediately so the overlay never stays
-            // stuck showing the consumed command while the page navigates.
-            setRecognizedText('');
-
-            console.log(
-              `[VoiceRecognition.web] Live command matched: ${liveCommand} ("${cleanText}")`
-            );
-            if (handler) {
-              void (async () => {
-                const text = await stopListening();
-                latestResultRef.current = '';
-                handler(liveCommand, text || cleanText);
-              })();
-            } else {
-              void stopListening();
-            }
-            return;
-          }
 
           if (isFinal) {
             // Hands-free auto-listen loop: hand the recognized command
@@ -349,19 +375,12 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setIsRecognizing(false);
       activeRef.current = false;
       console.log('[VoiceRecognition.web] Speech recognition ended');
-      // Keep the microphone live: when a listening session is still active
-      // (not a deliberate stop), restart the recognizer immediately so the
-      // mic never freezes between SpeechRecognition sessions.
-      if (keepAliveRef.current && !stopRequestedRef.current) {
-        if (restartTimerRef.current) {
-          clearTimeout(restartTimerRef.current);
-          restartTimerRef.current = null;
-        }
-        console.log('[VoiceRecognition.web] Restarting recognition to keep mic live');
-        void startListening();
-      } else {
-        scheduleRestart();
-      }
+      // Keep the microphone live: while a listening session is still active
+      // (not a deliberate stop) restart the recognizer so the mic never
+      // freezes between sessions. The restart is debounced because Chrome
+      // throws InvalidStateError if start() is called synchronously from
+      // inside onend.
+      scheduleRestart();
     };
 
     return () => {
