@@ -65,6 +65,7 @@ const AITeacherContent: React.FC = () => {
       )}
       <View style={styles.commandInputContainer}>
         <TextInput
+          id="ai-teacher-command-input"
           style={styles.commandInput}
           value={typedCommand}
           onChangeText={setTypedCommand}
@@ -72,6 +73,7 @@ const AITeacherContent: React.FC = () => {
           placeholder="Type a command (e.g. next, explain arrays)..."
           placeholderTextColor={Colors.muted}
           returnKeyType="send"
+          autoComplete="off"
           accessibilityLabel="Command input"
           accessibilityHint="Type a voice command like next or a question, then press enter"
         />
