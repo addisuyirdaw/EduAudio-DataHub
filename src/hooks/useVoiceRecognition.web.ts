@@ -15,8 +15,9 @@
  * - `onend` / `onerror` auto-restart while `keepAlive` is true (debounced so
  *   Chrome doesn't throw InvalidStateError from a synchronous start()), so a
  *   held push-to-talk press survives transient recognition resets and the
- *   microphone never freezes. A `network` error backs off exponentially
- *   (5s → 30s) so Google's speech servers are not rate-limited in a tight
+ *   microphone never freezes. A `network` error locks the loop for an
+ *   exponential backoff window (5s → 30s) and `onend` never restarts during
+ *   that lock, so Google's speech servers are not rate-limited in a tight
  *   loop.
  * - Auto-restarts keep the session callbacks: re-arming the recognizer via a
  *   `startListening()` call without options preserves the armed `onFinalResult`
@@ -178,6 +179,12 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
   const ttsActiveAtMicOpenRef = useRef(false);
   const networkBackoffMsRef = useRef(0);
   const pauseOnlyRef = useRef(false);
+  // When a 'network' error occurs, restarts are locked during the backoff
+  // window: neither onend nor a failed start() may restart the recognizer
+  // early and hammer Google's speech servers. The unlock timer owns the
+  // restart once the window elapses.
+  const isNetworkErrorBlockedRef = useRef(false);
+  const networkUnblockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const startListening = useCallback(async (options?: StartListeningOptions) => {
     const recognition = recognitionRef.current;
@@ -217,7 +224,9 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       console.error('[VoiceRecognition.web] Start listening error:', startError);
       // A transient start failure (e.g. restarting too quickly right after
       // onend) must not kill the session: retry while keepAlive is requested.
-      if (keepAliveRef.current && !stopRequestedRef.current) {
+      // Never retry fast during a network-error backoff window — the unlock
+      // timer owns the retry in that case.
+      if (keepAliveRef.current && !stopRequestedRef.current && !isNetworkErrorBlockedRef.current) {
         setTimeout(() => {
           if (keepAliveRef.current && !stopRequestedRef.current) {
             void startListening();
@@ -276,8 +285,18 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setIsRecognizing(true);
       setError(null);
       console.log('[VoiceRecognition.web] Speech recognition started');
-      // A session actually started: the network recovered, reset the backoff.
-      networkBackoffMsRef.current = 0;
+      // A session actually started: the network recovered — lift the backoff
+      // lock and cancel the pending unlock timer.
+      isNetworkErrorBlockedRef.current = false;
+      if (networkUnblockTimerRef.current) {
+        clearTimeout(networkUnblockTimerRef.current);
+        networkUnblockTimerRef.current = null;
+      }
+      // NOTE: the backoff value is deliberately NOT reset here. Resetting on
+      // every start (even one that immediately fails with another network
+      // error) would keep the delay at its initial value forever, so the
+      // delay never escalates during a persistent outage. It resets only when
+      // real student speech is captured in onresult.
       // Mic is live: immediately silence any TTS output so the mic is never
       // blocked by audio the AI is currently reading aloud. Skipped in
       // barge-in mode, where the mic intentionally opens WHILE the teacher is
@@ -356,6 +375,10 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       // soon as the student speaks, before any async gating runs.
       setRecognizedText(cleanText);
 
+      // Real student speech was heard: the recognizer is healthy, so reset the
+      // network-error backoff and start any next outage from scratch.
+      networkBackoffMsRef.current = 0;
+
       if (liveCommand && !stopRequestedRef.current) {
         // Consume the command now: prevent re-firing on later result events.
         stopRequestedRef.current = true;
@@ -424,8 +447,10 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
 
       // 'network' means Google's speech servers could not be reached or
       // rate-limited the browser. Restarting immediately only makes it worse,
-      // so back off exponentially instead of hammering the servers.
+      // so lock the loop during a backoff window (5s, doubling up to 30s) and
+      // let the unlock timer own the next restart attempt.
       if (errorCode === 'network') {
+        isNetworkErrorBlockedRef.current = true;
         networkBackoffMsRef.current =
           networkBackoffMsRef.current === 0
             ? NETWORK_BACKOFF_INITIAL_MS
@@ -434,7 +459,17 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
         console.warn(
           `[VoiceRecognition.web] Network error; retrying in ${networkBackoffMsRef.current}ms`
         );
-        scheduleRestart(networkBackoffMsRef.current);
+        if (networkUnblockTimerRef.current) {
+          clearTimeout(networkUnblockTimerRef.current);
+        }
+        networkUnblockTimerRef.current = setTimeout(() => {
+          networkUnblockTimerRef.current = null;
+          isNetworkErrorBlockedRef.current = false;
+          if (keepAliveRef.current && !stopRequestedRef.current) {
+            console.log('[VoiceRecognition.web] Retrying speech recognition after network backoff');
+            void startListening();
+          }
+        }, networkBackoffMsRef.current);
         return;
       }
 
@@ -451,12 +486,19 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setIsRecognizing(false);
       activeRef.current = false;
       console.log('[VoiceRecognition.web] Speech recognition ended');
+      // During the network-error backoff window, never restart here — the
+      // unlock timer owns the restart. Without this guard, onend would bypass
+      // the backoff and restart immediately, hammering Google's servers.
+      if (isNetworkErrorBlockedRef.current) {
+        console.log('[VoiceRecognition.web] onend during network backoff; waiting for lock to expire');
+        return;
+      }
       // Keep the microphone live: while a listening session is still active
       // (not a deliberate stop) restart the recognizer so the mic never
       // freezes between sessions. The restart is debounced because Chrome
       // throws InvalidStateError if start() is called synchronously from
-      // inside onend. A restart already scheduled by onerror (e.g. the network
-      // backoff) is left untouched so its delay is not overwritten.
+      // inside onend. A restart already scheduled by onerror is left
+      // untouched so its delay is not overwritten.
       if (!restartTimerRef.current) {
         scheduleRestart();
       }
@@ -469,6 +511,11 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
         clearTimeout(restartTimerRef.current);
         restartTimerRef.current = null;
       }
+      if (networkUnblockTimerRef.current) {
+        clearTimeout(networkUnblockTimerRef.current);
+        networkUnblockTimerRef.current = null;
+      }
+      isNetworkErrorBlockedRef.current = false;
       try {
         recognition.abort();
       } catch {
@@ -497,6 +544,11 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;
     }
+    if (networkUnblockTimerRef.current) {
+      clearTimeout(networkUnblockTimerRef.current);
+      networkUnblockTimerRef.current = null;
+    }
+    isNetworkErrorBlockedRef.current = false;
 
     if (recognition) {
       try {
@@ -565,6 +617,11 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;
     }
+    if (networkUnblockTimerRef.current) {
+      clearTimeout(networkUnblockTimerRef.current);
+      networkUnblockTimerRef.current = null;
+    }
+    isNetworkErrorBlockedRef.current = false;
     activeRef.current = false;
     const recognition = recognitionRef.current;
     if (recognition) {
