@@ -104,26 +104,29 @@ export function useAITeacher(): UseAITeacherReturn {
    */
   const handleLiveCommand = useCallback(async (command: LiveVoiceCommand, transcript: string) => {
     liveCommandHandledRef.current = true;
-    // The command is consumed: clear the transcript state so the UI overlay
-    // never stays stuck showing it while the page navigates.
-    voiceRecognition.resetRecognizedText();
     console.log(`[useAITeacher] Live command: ${command} ("${transcript}")`);
     if (command === 'player' || command === 'teacher') {
       modeBridge.requestMode(command);
       return;
     }
-    // Instant "stop" / "pause" / "wait": cancel all active speech right away,
-    // move to a paused state, then acknowledge and re-arm the mic hands-free.
-    if (command === 'pause') {
-      await context.pauseAndConfirm();
-      return;
-    }
     try {
-      await context.submitTextCommand(command === 'greeting' ? transcript : command);
+      // Instant "stop" / "pause" / "wait": cancel all active speech right away,
+      // move to a paused state, then acknowledge and re-arm the mic hands-free.
+      if (command === 'pause') {
+        await context.pauseAndConfirm();
+      } else {
+        // Navigation / start / greeting commands route through the same FSM
+        // pipeline as a spoken PTT command, which speaks the confirmation.
+        await context.submitTextCommand(command === 'greeting' ? transcript : command);
+      }
+      // The command completed: clear the transcript so the UI overlay and live
+      // region never stay stuck showing the consumed command.
+      voiceRecognition.resetRecognizedText();
     } catch (error) {
       console.error('[useAITeacher] Live command error:', error);
+      voiceRecognition.resetRecognizedText();
     }
-  }, [context]);
+  }, [context, voiceRecognition]);
 
   // Speak-then-listen accessibility loop:
   //  - 'autoListen': greeting / page reading / command response finished ->

@@ -54,7 +54,7 @@ export interface StartListeningOptions {
  * mode bridge; 'greeting' routes the full sentence to the teacher engine
  * for a friendly spoken response; the rest are page-navigation commands.
  */
-export type LiveVoiceCommand = 'next' | 'back' | 'repeat' | 'player' | 'teacher' | 'greeting' | 'pause';
+export type LiveVoiceCommand = 'next' | 'back' | 'repeat' | 'player' | 'teacher' | 'greeting' | 'pause' | 'start';
 
 /**
  * Resolve an instant navigation keyword from the live transcript.
@@ -73,6 +73,9 @@ function resolveLiveCommand(cleanText: string): LiveVoiceCommand | null {
   if (/(?:^|\W)(?:hello|hi|hey|good morning|good afternoon|good evening)(?:$|\W)/.test(cleanText)) return 'greeting';
   if (/(?:^|\W)(?:player)(?:$|\W)/.test(cleanText)) return 'player';
   if (/(?:^|\W)(?:teacher)(?:$|\W)/.test(cleanText)) return 'teacher';
+  // Start/Teach: begin (or confirm) teaching the current page. Checked after
+  // mode words so "start the player" still switches modes instead of teaching.
+  if (/(?:^|\W)(?:start|teach|go ahead|begin)(?:$|\W)/.test(cleanText)) return 'start';
   return null;
 }
 

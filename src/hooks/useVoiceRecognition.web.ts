@@ -12,14 +12,17 @@
  * - `startListening` is idempotent (no-op while already listening).
  * - `onresult` captures both interim and final transcripts, so text keeps
  *   flowing even while the lesson document is initializing.
- * - `onerror` / `onend` auto-restart while `keepAlive` is true so a held
- *   push-to-talk press survives transient recognition resets.
+ * - `onend` restarts the recognizer immediately (and `onerror` after a short
+ *   delay) while `keepAlive` is true, so a held push-to-talk press survives
+ *   transient recognition resets and the microphone never freezes.
  * - `startListening(options)` registers an `onFinalResult` callback used by
  *   the hands-free auto-listen loop; it is cleared again by `stopListening`.
  * - `stopListening` returns the latest recognized transcript.
- * - Every result is checked against `Speech.isSpeakingAsync()` and dropped
- *   while the AI is speaking out loud, so the AI's own TTS output can never
- *   be captured back into the mic and re-routed as a phantom command.
+ * - Every result is gated by a bounded TTS echo guard: input is dropped only
+ *   while the AI is actually speaking out loud, and a stuck
+ *   `Speech.isSpeakingAsync()` (seen on some web browsers) can never block
+ *   the mic, so the AI's own TTS output is never re-routed as a phantom
+ *   command while real student speech still gets through.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -56,7 +59,7 @@ export interface StartListeningOptions {
  * mode bridge; 'greeting' routes the full sentence to the teacher engine
  * for a friendly spoken response; the rest are page-navigation commands.
  */
-export type LiveVoiceCommand = 'next' | 'back' | 'repeat' | 'player' | 'teacher' | 'greeting' | 'pause';
+export type LiveVoiceCommand = 'next' | 'back' | 'repeat' | 'player' | 'teacher' | 'greeting' | 'pause' | 'start';
 
 /**
  * Resolve an instant navigation keyword from the live transcript.
@@ -75,6 +78,9 @@ function resolveLiveCommand(cleanText: string): LiveVoiceCommand | null {
   if (/(?:^|\W)(?:hello|hi|hey|good morning|good afternoon|good evening)(?:$|\W)/.test(cleanText)) return 'greeting';
   if (/(?:^|\W)(?:player)(?:$|\W)/.test(cleanText)) return 'player';
   if (/(?:^|\W)(?:teacher)(?:$|\W)/.test(cleanText)) return 'teacher';
+  // Start/Teach: begin (or confirm) teaching the current page. Checked after
+  // mode words so "start the player" still switches modes instead of teaching.
+  if (/(?:^|\W)(?:start|teach|go ahead|begin)(?:$|\W)/.test(cleanText)) return 'start';
   return null;
 }
 
@@ -119,6 +125,15 @@ function getRecognition(): SpeechRecognitionLike | null {
 }
 
 const RESTART_DELAY_MS = 200;
+
+/**
+ * How long the `onresult` echo guard waits for the AI's own TTS to finish
+ * before processing captured input anyway. Some web browsers leave
+ * `Speech.isSpeakingAsync()` stuck at true after the utterance ends; this
+ * bound guarantees the microphone unmutes shortly after speaking finishes
+ * instead of blocking voice commands forever.
+ */
+const TTS_UNBLOCK_MS = 1000;
 
 /**
  * Hook for voice recognition functionality (web build).
@@ -241,33 +256,39 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       }
       if (!transcript) return;
 
+      // Placeholder guard: never show a fake "Listening..." hint.
+      if (!isRealTranscript(transcript)) {
+        setRecognizedText('');
+        console.log(`[VoiceRecognition.web] Ignoring non-speech transcript "${transcript}"`);
+        return;
+      }
+
+      const cleanText = transcript.toLowerCase().trim();
+
+      // Immediate UI feedback: update the "Heard:" overlay in real time as
+      // soon as the student speaks, before any async gating runs.
+      setRecognizedText(cleanText);
+
       void (async () => {
         try {
-          // Echo guard: if the AI is speaking out loud right now, this audio
-          // is almost certainly its own voice echoing back into the mic. Drop
-          // it — the AI's TTS must never be captured as a phantom command.
-          if (await Speech.isSpeakingAsync()) {
-            console.log(`[VoiceRecognition.web] Ignoring "${transcript}" while TTS is active`);
-            return;
+          // Echo guard with a stuck-TTS fallback: while the AI's own TTS is
+          // still playing, audio in the mic is its echo — wait (bounded) for
+          // speech to finish so a command heard right as TTS ends is never
+          // dropped. Some web browsers leave isSpeakingAsync() stuck at true
+          // after the utterance ends; the bound guarantees the mic unmutes
+          // shortly after speaking finishes instead of blocking forever.
+          const ttsWaitDeadline = Date.now() + TTS_UNBLOCK_MS;
+          while (Date.now() < ttsWaitDeadline && (await Speech.isSpeakingAsync())) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
           }
 
-          // Placeholder guard: never store a fake "Listening..." hint as the
-          // recognized transcript and never feed it to the command matcher.
-          if (!isRealTranscript(transcript)) {
-            setRecognizedText('');
-            console.log(`[VoiceRecognition.web] Ignoring non-speech transcript "${transcript}"`);
-            return;
-          }
-
-          latestResultRef.current = transcript;
-          setRecognizedText(transcript);
+          latestResultRef.current = cleanText;
           // Blind accessibility: expose the live transcript immediately.
-          console.log('STT Captured:', transcript);
+          console.log('STT Captured:', cleanText);
 
           // Real-time keyword evaluation: test the live transcript on every
           // speech event (interim AND final) so page navigation doesn't wait
           // for the speech session to end.
-          const cleanText = transcript.toLowerCase().trim();
           const liveCommand = resolveLiveCommand(cleanText);
 
           if (liveCommand && !stopRequestedRef.current) {
@@ -288,7 +309,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
               void (async () => {
                 const text = await stopListening();
                 latestResultRef.current = '';
-                handler(liveCommand, text || transcript);
+                handler(liveCommand, text || cleanText);
               })();
             } else {
               void stopListening();
@@ -300,7 +321,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
             // Hands-free auto-listen loop: hand the recognized command
             // straight to the teacher engine without requiring a
             // push-to-talk release.
-            finalResultRef.current?.(transcript);
+            finalResultRef.current?.(cleanText);
           }
         } catch (error) {
           console.error('[VoiceRecognition.web] Result processing error:', error);
@@ -328,7 +349,19 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
       setIsRecognizing(false);
       activeRef.current = false;
       console.log('[VoiceRecognition.web] Speech recognition ended');
-      scheduleRestart();
+      // Keep the microphone live: when a listening session is still active
+      // (not a deliberate stop), restart the recognizer immediately so the
+      // mic never freezes between SpeechRecognition sessions.
+      if (keepAliveRef.current && !stopRequestedRef.current) {
+        if (restartTimerRef.current) {
+          clearTimeout(restartTimerRef.current);
+          restartTimerRef.current = null;
+        }
+        console.log('[VoiceRecognition.web] Restarting recognition to keep mic live');
+        void startListening();
+      } else {
+        scheduleRestart();
+      }
     };
 
     return () => {
