@@ -104,6 +104,9 @@ export function useAITeacher(): UseAITeacherReturn {
    */
   const handleLiveCommand = useCallback(async (command: LiveVoiceCommand, transcript: string) => {
     liveCommandHandledRef.current = true;
+    // The command is consumed: clear the transcript state so the UI overlay
+    // never stays stuck showing it while the page navigates.
+    voiceRecognition.resetRecognizedText();
     console.log(`[useAITeacher] Live command: ${command} ("${transcript}")`);
     if (command === 'player' || command === 'teacher') {
       modeBridge.requestMode(command);

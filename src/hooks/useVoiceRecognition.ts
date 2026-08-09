@@ -76,6 +76,20 @@ function resolveLiveCommand(cleanText: string): LiveVoiceCommand | null {
   return null;
 }
 
+/**
+ * A transcript only counts as real speech when it carries actual words. The
+ * recognizer can emit the UI hint ("Listening...") or pure silence /
+ * punctuation; those must never be stored as `recognizedText` or fed to the
+ * command matcher, otherwise the overlay gets stuck on a fake transcript.
+ */
+function isRealTranscript(text: string): boolean {
+  const clean = text.toLowerCase().trim();
+  if (!clean) return false;
+  if (/^listening[.\s]*$/.test(clean)) return false;
+  if (/^[\s.\-…]*$/.test(clean)) return false;
+  return true;
+}
+
 const RESTART_DELAY_MS = 200;
 
 /**
@@ -204,6 +218,15 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
             console.log(`[VoiceRecognition] Ignoring "${text}" while TTS is active`);
             return;
           }
+
+          // Placeholder guard: never store a fake "Listening..." hint as the
+          // recognized transcript and never feed it to the command matcher.
+          if (!isRealTranscript(text)) {
+            setRecognizedText('');
+            console.log(`[VoiceRecognition] Ignoring non-speech transcript "${text}"`);
+            return;
+          }
+
           latestResultRef.current = text;
           setRecognizedText(text);
           console.log('STT Captured:', text);
@@ -218,10 +241,14 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
             const handler = liveCommandRef.current;
             liveCommandRef.current = null;
             finalResultRef.current = null;
+            // Clear the transcript immediately so the overlay never stays
+            // stuck showing the consumed command while the page navigates.
+            setRecognizedText('');
             console.log(`[VoiceRecognition] Live command matched: ${liveCommand} ("${cleanText}")`);
             if (handler) {
               void (async () => {
                 const captured = await stopListening();
+                latestResultRef.current = '';
                 handler(liveCommand, captured || text);
               })();
             } else {
@@ -252,6 +279,13 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
           if (await Speech.isSpeakingAsync()) {
             return;
           }
+          // Placeholder guard: never feed a fake "Listening..." hint to the
+          // command matcher.
+          if (!isRealTranscript(partialText)) {
+            setRecognizedText('');
+            console.log(`[VoiceRecognition] Ignoring non-speech partial "${partialText}"`);
+            return;
+          }
           // Real-time keyword evaluation on interim results: act the moment a
           // navigation keyword appears, before the speech session ends.
           const cleanText = partialText.toLowerCase().trim();
@@ -262,10 +296,14 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
             const handler = liveCommandRef.current;
             liveCommandRef.current = null;
             finalResultRef.current = null;
+            // Clear the transcript immediately so the overlay never stays
+            // stuck showing the consumed command while the page navigates.
+            setRecognizedText('');
             console.log(`[VoiceRecognition] Live command matched: ${liveCommand} ("${cleanText}")`);
             if (handler) {
               void (async () => {
                 const captured = await stopListening();
+                latestResultRef.current = '';
                 handler(liveCommand, captured || partialText);
               })();
             } else {

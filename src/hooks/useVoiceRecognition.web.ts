@@ -79,6 +79,20 @@ function resolveLiveCommand(cleanText: string): LiveVoiceCommand | null {
 }
 
 /**
+ * A transcript only counts as real speech when it carries actual words. The
+ * browser recognizer can emit the UI hint ("Listening...") or pure silence /
+ * punctuation; those must never be stored as `recognizedText` or fed to the
+ * command matcher, otherwise the overlay gets stuck on a fake transcript.
+ */
+function isRealTranscript(text: string): boolean {
+  const clean = text.toLowerCase().trim();
+  if (!clean) return false;
+  if (/^listening[.\s]*$/.test(clean)) return false;
+  if (/^[\s.\-…]*$/.test(clean)) return false;
+  return true;
+}
+
+/**
  * Minimal structural typing for the browser SpeechRecognition API.
  * Cast via `any` keeps us independent of lib.dom version differences.
  */
@@ -237,6 +251,14 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
             return;
           }
 
+          // Placeholder guard: never store a fake "Listening..." hint as the
+          // recognized transcript and never feed it to the command matcher.
+          if (!isRealTranscript(transcript)) {
+            setRecognizedText('');
+            console.log(`[VoiceRecognition.web] Ignoring non-speech transcript "${transcript}"`);
+            return;
+          }
+
           latestResultRef.current = transcript;
           setRecognizedText(transcript);
           // Blind accessibility: expose the live transcript immediately.
@@ -255,6 +277,9 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
             const handler = liveCommandRef.current;
             liveCommandRef.current = null;
             finalResultRef.current = null;
+            // Clear the transcript immediately so the overlay never stays
+            // stuck showing the consumed command while the page navigates.
+            setRecognizedText('');
 
             console.log(
               `[VoiceRecognition.web] Live command matched: ${liveCommand} ("${cleanText}")`
@@ -262,6 +287,7 @@ export function useVoiceRecognition(): UseVoiceRecognitionReturn {
             if (handler) {
               void (async () => {
                 const text = await stopListening();
+                latestResultRef.current = '';
                 handler(liveCommand, text || transcript);
               })();
             } else {

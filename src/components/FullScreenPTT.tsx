@@ -120,9 +120,11 @@ export const FullScreenPTT: React.FC<FullScreenPTTProps> = ({ onPressIn, onPress
           <View style={styles.pulseRingOuter} />
           <Text style={styles.listeningText}>Listening...</Text>
           {/* Live transcript debugger: shows exactly what the browser speech
-              engine is capturing, updating on every interim result. */}
+              engine is capturing, updating on every interim result. Never
+              substitute a placeholder here — an empty transcript renders as
+              an empty string so the overlay can't get stuck on "Listening...". */}
           <Text style={styles.debugTranscript}>
-            Heard: "{transcript || 'Listening...'}"
+            Heard: "{transcript || ''}"
           </Text>
         </View>
       )}
